@@ -722,6 +722,35 @@ _CATALOG_NAME_PREFIXES = (
 # JSON from disk on every query. Invalidated by file mtime.
 _catalog_cache: Dict[str, Any] = {"mtime": None, "data": None}
 
+# Namespaces the UEFN AssetReferenceRestrictions validator accepts in user maps
+# (verified empirically 2026-06: hand-placed actors reference only these).
+# Everything else in the mounted library — e.g. /Game/Environments/Sets/* —
+# fails validation and blocks publishing.
+_PUBLISHABLE_PREFIXES = ("/Game/Creative/", "/Game/Packages/", "/Engine/BasicShapes/")
+
+
+def is_publishable_path(path: str) -> bool:
+    """True if a user map may legally reference this asset path."""
+    if path.startswith(_PUBLISHABLE_PREFIXES):
+        return True
+    parts = path.split("/")
+    # Gallery plugin mounts: /City_Assets/..., /Suburban_Assets/..., etc.
+    return len(parts) > 1 and parts[1].endswith("_Assets")
+
+
+def _gallery_mounts() -> List[str]:
+    """Discover all *_Assets gallery plugin mounts from the Asset Registry."""
+    ar = unreal.AssetRegistryHelpers.get_asset_registry()
+    roots: Set[str] = set()
+    try:
+        for p in ar.get_all_cached_paths():
+            root = str(p).strip("/").split("/")[0]
+            if root.endswith("_Assets"):
+                roots.add(f"/{root}")
+    except Exception as e:
+        unreal.log_warning(f"[asset_catalog] gallery mount discovery failed: {e}")
+    return sorted(roots)
+
 
 def _catalog_json_path() -> str:
     saved_dir = os.path.join(unreal.Paths.project_saved_dir(), "UEFN_Toolbelt")
@@ -845,6 +874,7 @@ def asset_catalog_scan(
     groups: list = None,
     extra_paths: list = None,
     max_per_class: int = 0,
+    include_gallery_mounts: bool = True,
     **kwargs,
 ) -> dict:
     """
@@ -887,6 +917,8 @@ def asset_catalog_scan(
         classes.extend(_CATALOG_CLASS_GROUPS[g])
 
     search_paths = list(_SEARCH_PATHS)
+    if include_gallery_mounts:
+        search_paths.extend(_gallery_mounts())
     if extra_paths:
         search_paths.extend(extra_paths)
     seen: Set[str] = set()
@@ -966,6 +998,7 @@ def asset_catalog_query(
     sort: str = "name",
     stats_only: bool = False,
     measure: bool = False,
+    publishable: bool = False,
     **kwargs,
 ) -> dict:
     """
@@ -994,6 +1027,12 @@ def asset_catalog_query(
                       "tris", and "slots". Needed in UEFN: the cooked pak
                       Asset Registry strips Triangles/ApproxSize tags, so
                       scan-time metadata is empty there (~45 ms per asset).
+        publishable:  Only return assets a user map may legally reference
+                      (/Game/Creative, /Game/Packages, *_Assets gallery
+                      mounts). Anything else fails the UEFN
+                      AssetReferenceRestrictions validator and blocks
+                      publishing — ALWAYS set True when picking assets to
+                      place in a real map.
 
     Returns:
         {"status": "ok", "total_matches": int, "shown": int, "results": [...],
@@ -1023,6 +1062,8 @@ def asset_catalog_query(
         if cls_f and cls_f not in cls.lower():
             continue
         for e in entries:
+            if publishable and not is_publishable_path(e["path"]):
+                continue
             hay = (e["name"] + " " + e["path"]).lower()
             if tokens and not all(t in hay for t in tokens):
                 continue

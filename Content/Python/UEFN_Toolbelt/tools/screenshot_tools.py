@@ -127,7 +127,9 @@ def _camera_for_bounds(
         center.y + offset.y,
         center.z + offset.z,
     )
-    cam_rot = unreal.Rotator(pitch, yaw + 180.0, 0.0)  # +180 to look back at center
+    # Keyword args — Rotator's positional order is (roll, pitch, yaw); passing
+    # (pitch, yaw, roll) positionally rolls the camera sideways.
+    cam_rot = unreal.Rotator(roll=0.0, pitch=pitch, yaw=yaw + 180.0)  # +180 to look back at center
 
     return cam_loc, cam_rot
 
@@ -385,6 +387,193 @@ def screenshot_timed_series(
         return {"status": "error", "message": "count must be at least 1"}
     _do_timed_series(name, count, width, height, max(0.0, interval_sec))
     return {"status": "ok", "count": count, "folder": _SHOT_DIR}
+
+
+# ─── Orbit series (tick-driven) ───────────────────────────────────────────────
+#
+# ⚠️ DEPRECATED for low-VRAM machines: every in-engine capture goes through the
+# high-res screenshot pipeline (scene re-render + shader compilation + render
+# target allocation) and has OOM-crashed UEFN on a 6GB GPU. Prefer the external
+# window capture workflow: position the camera via MCP set_viewport_camera,
+# then grab the OS window with scripts/capture_uefn_window.ps1 — zero engine
+# cost. This block is kept for high-VRAM machines only.
+
+_orbit = {
+    "active": False, "handle": None, "frame": 0, "next_at": 0,
+    "phase": "move", "index": 0, "shots": [], "params": None,
+}
+
+
+def _orbit_manifest_path() -> str:
+    return os.path.join(_SHOT_DIR, "orbit_manifest.json")
+
+
+def _orbit_write_manifest(done: bool) -> None:
+    import json
+    _ensure_dir()
+    p = _orbit["params"] or {}
+    data = {
+        "done":   done,
+        "taken":  len(_orbit["shots"]),
+        "total":  p.get("shots", 0),
+        "files":  _orbit["shots"],
+        "folder": _SHOT_DIR,
+    }
+    try:
+        with open(_orbit_manifest_path(), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        unreal.log_warning(f"[Orbit] manifest write failed: {e}")
+
+
+def _orbit_stop() -> None:
+    _orbit["active"] = False
+    h = _orbit["handle"]
+    _orbit["handle"] = None
+    if h is not None:
+        try:
+            unreal.unregister_slate_post_tick_callback(h)
+        except Exception as e:
+            # Never silent: a stale callback re-fires the state machine forever.
+            unreal.log_error(f"[Orbit] unregister failed — stale tick callback! {e}")
+
+
+def _orbit_camera_for(index: int) -> tuple:
+    p = _orbit["params"]
+    cx, cy, cz = p["center"]
+    angle = 360.0 / p["shots"] * index
+    rad = math.radians(angle)
+    loc = unreal.Vector(cx + p["radius"] * math.cos(rad),
+                        cy + p["radius"] * math.sin(rad),
+                        cz + p["height"])
+    pitch = -math.degrees(math.atan2(p["height"], p["radius"]))
+    rot = unreal.Rotator(roll=0.0, pitch=pitch, yaw=angle + 180.0)
+    return loc, rot
+
+
+def _orbit_tick(_dt: float) -> None:
+    if not _orbit["active"]:
+        return
+    _orbit["frame"] += 1
+    if _orbit["frame"] < _orbit["next_at"]:
+        return
+
+    p = _orbit["params"]
+    try:
+        if _orbit["phase"] == "move":
+            loc, rot = _orbit_camera_for(_orbit["index"])
+            unreal.EditorLevelLibrary.set_level_viewport_camera_info(loc, rot)
+            _orbit["phase"] = "shoot"
+            _orbit["next_at"] = _orbit["frame"] + p["settle_frames"]
+        elif _orbit["phase"] == "shoot":
+            if _orbit["index"] >= p["shots"]:
+                # Belt-and-braces: if a stale callback survives unregister,
+                # never shoot past the plan — just keep trying to stop.
+                _orbit_stop()
+                return
+            out = _timestamped(f"{p['name']}_{_orbit['index']:02d}",
+                               p["width"], p["height_px"])
+            if _take_shot(out, p["width"], p["height_px"]):
+                _orbit["shots"].append(out)
+            _orbit["index"] += 1
+            if _orbit["index"] >= p["shots"]:
+                _orbit_stop()
+                _orbit_write_manifest(done=True)
+                unreal.log(f"[Orbit] ✓ {len(_orbit['shots'])}/{p['shots']} shots → {_SHOT_DIR}")
+                return
+            _orbit["phase"] = "move"
+            _orbit["next_at"] = _orbit["frame"] + p["settle_frames"]
+    except Exception as e:
+        unreal.log_error(f"[Orbit] aborted: {e}")
+        _orbit_stop()
+        _orbit_write_manifest(done=True)
+
+
+@register_tool(
+    name="screenshot_orbit",
+    category="Screenshot",
+    description=(
+        "Schedule an orbit of screenshots around a point — the camera circles, "
+        "settles N frames, captures, repeats. Tick-driven and non-blocking: safe "
+        "to call over MCP. Progress lands in screenshots/orbit_manifest.json."
+    ),
+    icon="🛰",
+    tags=["screenshot", "orbit", "series", "capture", "ai", "review"],
+    example='tb.run("screenshot_orbit", center=[12000, 0, 400], radius=3000, shots=4)',
+)
+def screenshot_orbit(
+    center: list = None,
+    radius: float = 3000.0,
+    height: float = 1800.0,
+    shots: int = 4,
+    width: int = 960,
+    height_px: int = 540,
+    name: str = "orbit",
+    settle_frames: int = 30,
+    **kwargs,
+) -> dict:
+    """
+    Schedule a non-blocking orbit screenshot series around a world point.
+
+    The tool returns immediately; a slate post-tick state machine does the
+    work over the following seconds: position camera → wait settle_frames →
+    capture → next angle. When finished, screenshots/orbit_manifest.json has
+    "done": true and the file list. An external agent polls that file from
+    disk — never the editor.
+
+    Args:
+        center:        [x, y, z] world point to orbit. Default: current
+                       selection bounds center, else viewport camera position.
+        radius:        Orbit radius in cm.
+        height:        Camera height above center in cm.
+        shots:         Number of evenly spaced angles (1–24).
+        width:         Capture width in px.
+        height_px:     Capture height in px.
+        name:          Filename prefix.
+        settle_frames: Editor frames to wait between camera move and capture.
+
+    Returns:
+        {"status": "ok", "scheduled": shots, "manifest": path} immediately.
+    """
+    if _orbit["active"]:
+        return {"status": "error", "error": "An orbit is already running — wait for "
+                "orbit_manifest.json to show done:true"}
+
+    if center is None:
+        actors = get_selected_actors()
+        if actors:
+            try:
+                c, _e = actors_bounding_box(actors)
+                center = [c.x, c.y, c.z]
+            except Exception:
+                center = None
+    if center is None:
+        loc, _rot = _get_camera()
+        center = [loc.x, loc.y, loc.z]
+
+    shots = max(1, min(int(shots), 24))
+    _ensure_dir()
+
+    _orbit.update({
+        "active": True, "frame": 0, "next_at": 0, "phase": "move",
+        "index": 0, "shots": [],
+        "params": {
+            "center": [float(center[0]), float(center[1]), float(center[2])],
+            "radius": float(radius), "height": float(height), "shots": shots,
+            "width": int(width), "height_px": int(height_px),
+            "name": name, "settle_frames": max(5, int(settle_frames)),
+        },
+    })
+    _orbit_write_manifest(done=False)
+    try:
+        _orbit["handle"] = unreal.register_slate_post_tick_callback(_orbit_tick)
+    except Exception as e:
+        _orbit["active"] = False
+        return {"status": "error", "error": f"Could not register tick callback: {e}"}
+
+    unreal.log(f"[Orbit] Scheduled {shots} shots around {center}, r={radius}")
+    return {"status": "ok", "scheduled": shots, "manifest": _orbit_manifest_path(),
+            "folder": _SHOT_DIR}
 
 
 @register_tool(

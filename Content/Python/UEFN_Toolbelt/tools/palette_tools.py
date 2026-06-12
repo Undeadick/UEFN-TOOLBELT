@@ -106,7 +106,8 @@ def _measure_role_asset(asset_path: str) -> Optional[dict]:
     tags=["palette", "theme", "building", "modular", "ai", "save"],
     example='tb.run("palette_save", name="castle", roles={"wall": "/Game/.../PC_Tower_Wall_1", "floor": "/Game/.../PC_Floor_1"})',
 )
-def palette_save(name: str = "", roles: dict = None, overwrite: bool = True, **kwargs) -> dict:
+def palette_save(name: str = "", roles: dict = None, overwrite: bool = True,
+                 allow_restricted: bool = False, **kwargs) -> dict:
     """
     Create or update a theme palette.
 
@@ -115,6 +116,10 @@ def palette_save(name: str = "", roles: dict = None, overwrite: bool = True, **k
         roles:     {role: asset_path}. Required roles: floor, wall.
                    Optional: door, roof, corner, window, stairs, pillar, trim.
         overwrite: Replace an existing palette of the same name (default True).
+        allow_restricted: Permit asset paths that fail the UEFN
+                   AssetReferenceRestrictions validator (map can't be
+                   published with them). Default False — rejected with a
+                   clear error instead of building an unpublishable map.
 
     Each asset is loaded once to capture real dimensions and the local
     bounding box — the data building_generate needs for exact placement.
@@ -124,6 +129,18 @@ def palette_save(name: str = "", roles: dict = None, overwrite: bool = True, **k
     if not roles:
         return {"status": "error", "error": "roles dict is required, e.g. "
                 '{"wall": "/Game/...", "floor": "/Game/..."}'}
+
+    if not allow_restricted:
+        from .api_capability_crawler import is_publishable_path
+        restricted = {r: p for r, p in roles.items() if not is_publishable_path(p)}
+        if restricted:
+            return {"status": "error",
+                    "error": "These assets fail UEFN publish validation "
+                             "(AssetReferenceRestrictions): " + str(restricted) +
+                             ". Pick assets from /Game/Creative, /Game/Packages or "
+                             "*_Assets gallery mounts (asset_catalog_query "
+                             "publishable=True), or pass allow_restricted=True "
+                             "for a non-publishable test build."}
 
     unknown = [r for r in roles if r not in ALL_ROLES]
     if unknown:
@@ -250,7 +267,7 @@ class _Spawner:
         loc = unreal.Vector(bbox_center_world[0] - off[0],
                             bbox_center_world[1] - off[1],
                             bbox_center_world[2] - off[2])
-        actor = self.actor_sub.spawn_actor_from_object(asset, loc, unreal.Rotator(0.0, yaw, 0.0))
+        actor = self.actor_sub.spawn_actor_from_object(asset, loc, unreal.Rotator(yaw=yaw))
         if actor is None:
             return None
         actor.set_actor_label(label)
@@ -437,9 +454,12 @@ def building_generate(
 
     if focus:
         try:
+            # Keyword args only — the Rotator positional order is (roll, pitch,
+            # yaw), not (pitch, yaw, roll); positional values here silently roll
+            # the camera sideways (see UEFN_QUIRKS).
             unreal.EditorLevelLibrary.set_level_viewport_camera_info(
                 unreal.Vector(cx, cy - d_total, base_z + floors * wall_h + max(w_total, d_total)),
-                unreal.Rotator(-45.0, 90.0, 0.0))
+                unreal.Rotator(roll=0.0, pitch=-45.0, yaw=90.0))
         except Exception:
             pass
 
