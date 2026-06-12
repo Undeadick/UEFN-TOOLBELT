@@ -444,6 +444,70 @@ def _c_spawn_actor(
     return {"actor": _serialize_actor(actor)}
 
 
+@_cmd("spawn_actors_bulk")
+def _c_spawn_actors_bulk(items: List[dict], folder: str = "", undo_label: str = "MCP bulk spawn") -> dict:
+    """
+    Spawn many actors in ONE editor transaction (one Ctrl+Z reverts all).
+
+    Args:
+        items: List of {"asset_path": str, "location": [x,y,z],
+                        "rotation": [pitch,yaw,roll] (optional),
+                        "scale": [x,y,z] (optional), "label": str (optional)}.
+               Max 2000 per call.
+        folder: World Outliner folder for all spawned actors (optional).
+        undo_label: Transaction name shown in the editor's undo history.
+
+    Assets are loaded once and reused — far faster than per-actor spawn_actor
+    calls for buildings, scatter fields, and other mass placements.
+
+    Example:
+        {"command": "spawn_actors_bulk", "params": {"items": [
+            {"asset_path": "/Engine/BasicShapes/Cube", "location": [0, 0, 0]},
+            {"asset_path": "/Engine/BasicShapes/Cube", "location": [300, 0, 0],
+             "rotation": [0, 45, 0], "label": "Cube_B"}
+        ], "folder": "BulkTest"}}
+    """
+    if not items:
+        return {"spawned": 0, "failed": 0, "actors": []}
+    if len(items) > 2000:
+        raise ValueError(f"{len(items)} items exceeds the 2000-per-call cap")
+
+    sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    asset_cache: Dict[str, Any] = {}
+    spawned, failed = [], 0
+
+    with unreal.ScopedEditorTransaction(undo_label):
+        for item in items:
+            path = item.get("asset_path", "")
+            if path not in asset_cache:
+                asset_cache[path] = unreal.EditorAssetLibrary.load_asset(path)
+            asset = asset_cache[path]
+            if asset is None:
+                failed += 1
+                continue
+            loc = item.get("location") or [0, 0, 0]
+            rot = item.get("rotation")
+            actor = sub.spawn_actor_from_object(
+                asset, unreal.Vector(*loc),
+                _rotator_from_list(rot) if rot else unreal.Rotator(0, 0, 0))
+            if actor is None:
+                failed += 1
+                continue
+            if item.get("scale"):
+                actor.set_actor_scale3d(unreal.Vector(*item["scale"]))
+            if item.get("label"):
+                actor.set_actor_label(item["label"])
+            if folder:
+                try:
+                    actor.set_folder_path(unreal.Name(folder))
+                except Exception:
+                    pass
+            spawned.append(actor.get_actor_label())
+
+    return {"spawned": len(spawned), "failed": failed, "actors": spawned[:50],
+            "truncated": len(spawned) > 50}
+
+
 @_cmd("delete_actors")
 def _c_delete_actors(actor_paths: List[str]) -> dict:
     sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)

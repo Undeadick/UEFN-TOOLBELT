@@ -398,3 +398,40 @@ def spawn_static_mesh_actor(
         actor.set_actor_scale3d(scale)
 
     return actor
+
+
+def trace_ground_z(
+    world_x: float,
+    world_y: float,
+    start_z: float = 50000.0,
+    end_z: float = -50000.0,
+) -> Optional[float]:
+    """
+    Canonical downward line trace: return the surface Z under (x, y), or None
+    when nothing is hit (e.g. off the island). Use for terrain-aware placement
+    so buildings and scatter sit on the actual ground instead of a fixed Z.
+
+    Visibility channel, simple collision. Canonical implementation — import
+    from core instead of re-implementing per tool (the old copy lived in
+    foliage_tools._surface_z and now delegates here).
+    """
+    try:
+        world = unreal.EditorLevelLibrary.get_editor_world()
+        # UEFN signature (verified live): kwarg is world_context_object and the
+        # call RETURNS HitResult-or-None — there is no out_hit parameter.
+        hit = unreal.SystemLibrary.line_trace_single(
+            world_context_object=world,
+            start=unreal.Vector(world_x, world_y, start_z),
+            end=unreal.Vector(world_x, world_y, end_z),
+            trace_channel=unreal.TraceTypeQuery.TRACE_TYPE_QUERY1,
+            trace_complex=False,
+            actors_to_ignore=[],
+            draw_debug_type=unreal.DrawDebugTrace.NONE,
+            ignore_self=True,
+        )
+        if hit:
+            # to_tuple()[4] = impact location (Vector)
+            return float(hit.to_tuple()[4].z)
+    except Exception as e:
+        log_warning(f"trace_ground_z({world_x:.0f}, {world_y:.0f}): {e}")
+    return None

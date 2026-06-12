@@ -132,34 +132,12 @@ def _poisson_disk_2d(
 
 def _surface_z(world_x: float, world_y: float, start_z: float = 50000.0, fallback_z: float = 0.0) -> float:
     """
-    Attempt a line trace downward to find the surface Z under (x, y).
-    Returns fallback_z if no hit is found (caller should pass center Z).
-
-    Note: unreal.SystemLibrary.line_trace_single requires a world context
-    object. In editor context this may not be available — the function
-    catches the failure gracefully and returns the fallback value.
+    Surface Z under (x, y), or fallback_z when nothing is hit.
+    Thin wrapper over the canonical core.trace_ground_z.
     """
-    try:
-        world = unreal.EditorLevelLibrary.get_editor_world()
-        hit_result = unreal.HitResult()
-        start = unreal.Vector(world_x, world_y, start_z)
-        end   = unreal.Vector(world_x, world_y, -50000.0)
-        hit   = unreal.SystemLibrary.line_trace_single(
-            world_object=world,
-            start=start,
-            end=end,
-            trace_channel=unreal.TraceTypeQuery.TRACE_TYPE_QUERY1,
-            trace_complex=False,
-            actors_to_ignore=[],
-            draw_debug_type=unreal.DrawDebugTrace.NONE,
-            out_hit=hit_result,
-            ignore_self=True,
-        )
-        if hit:
-            return hit_result.location.z
-    except Exception:
-        pass
-    return fallback_z  # fallback: use caller's center Z, not hardcoded 0
+    from ..core import trace_ground_z
+    z = trace_ground_z(world_x, world_y, start_z=start_z)
+    return z if z is not None else fallback_z
 
 
 # ─────────────────────────────────────────────────────────────────────────────

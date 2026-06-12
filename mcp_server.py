@@ -368,6 +368,28 @@ def spawn_actor(
 
 
 @mcp.tool()
+def spawn_actors_bulk(items: list[dict], folder: str = "",
+                      undo_label: str = "MCP bulk spawn") -> str:
+    """Spawn many actors in ONE editor transaction (one undo reverts all).
+
+    Far faster than repeated spawn_actor calls — assets are loaded once and
+    reused. Use for buildings, scatter fields, and any mass placement.
+
+    Args:
+        items:  List of dicts (max 2000):
+                {"asset_path": "/Game/...", "location": [x, y, z],
+                 "rotation": [pitch, yaw, roll],   # optional
+                 "scale": [x, y, z],               # optional
+                 "label": "MyActor"}               # optional
+        folder: World Outliner folder for all spawned actors.
+        undo_label: Name shown in the editor undo history.
+    """
+    return _j(_send("spawn_actors_bulk",
+                    {"items": items, "folder": folder, "undo_label": undo_label},
+                    timeout=LONG_OPERATION_TIMEOUT))
+
+
+@mcp.tool()
 def delete_actors(actor_paths: list[str]) -> str:
     """Delete actors by path name or label.
 

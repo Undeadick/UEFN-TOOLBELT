@@ -34,6 +34,7 @@ import unreal
 
 from ..core import (
     load_asset, log_info, log_warning, log_error, undo_transaction,
+    trace_ground_z,
 )
 from ..registry import register_tool
 
@@ -301,6 +302,7 @@ def building_generate(
     roof_style: str = "gable",
     roof_flip: bool = False,
     window_every: int = 0,
+    ground_snap: bool = False,
     dry_run: bool = False,
     focus: bool = False,
     **kwargs,
@@ -334,6 +336,10 @@ def building_generate(
                    check a gable-end screenshot after building.
         window_every: Every Nth perimeter wall segment becomes the "window"
                    piece (if the palette defines one). 0 = no windows.
+        ground_snap: Line-trace the terrain at the footprint center and use
+                   the hit Z as the ground level (overrides location[2]).
+                   The result includes per-corner terrain deltas so the
+                   caller can detect slopes too steep to build on.
         dry_run:   Plan only — return piece counts and bounds, spawn nothing.
         focus:     Jump the viewport to an overhead view after generation.
 
@@ -378,6 +384,23 @@ def building_generate(
 
     w_total = width * cell
     d_total = depth * cell
+
+    terrain = None
+    if ground_snap:
+        center_z = trace_ground_z(cx, cy)
+        if center_z is None:
+            return {"status": "error",
+                    "error": f"ground_snap: no ground hit under ({cx:.0f}, {cy:.0f})"}
+        base_z = center_z
+        corners = {}
+        for tag, dx, dy in (("sw", -1, -1), ("se", 1, -1), ("nw", -1, 1), ("ne", 1, 1)):
+            zc = trace_ground_z(cx + dx * w_total / 2.0, cy + dy * d_total / 2.0)
+            corners[tag] = round(zc - center_z, 1) if zc is not None else None
+        terrain = {"center_z": round(center_z, 1), "corner_dz": corners}
+        deltas = [abs(v) for v in corners.values() if v is not None]
+        if deltas and max(deltas) > 150.0:
+            log_warning(f"[building_generate] steep terrain under footprint: "
+                        f"corner deltas {corners} cm")
     ox = cx - w_total / 2.0   # footprint origin (south-west corner)
     oy = cy - d_total / 2.0
 
@@ -525,7 +548,8 @@ def building_generate(
 
     if dry_run:
         return {"status": "ok", "dry_run": True, "pieces": counts, "total": len(plan),
-                "cell": cell, "wall_height": wall_h, "bounds": bounds}
+                "cell": cell, "wall_height": wall_h, "bounds": bounds,
+                "terrain": terrain}
 
     # ── Spawn ────────────────────────────────────────────────────────────────
     spawner = _Spawner(folder)
@@ -550,4 +574,4 @@ def building_generate(
              f"({width}x{depth}x{floors}), {failed} failed, folder '{folder}'")
     return {"status": "ok", "pieces": counts, "total": len(spawner.spawned),
             "failed": failed, "cell": cell, "wall_height": wall_h,
-            "bounds": bounds, "folder": folder}
+            "bounds": bounds, "folder": folder, "terrain": terrain}

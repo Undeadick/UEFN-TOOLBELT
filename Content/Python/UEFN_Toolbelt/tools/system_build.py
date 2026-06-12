@@ -5,6 +5,34 @@ import unreal
 from ..registry import register_tool
 from ..core import log_info, log_error, log_warning, with_progress
 
+# ─── Shared build-log helpers ─────────────────────────────────────────────────
+# The editor writes MANY logs into Saved/Logs (UnrealRevisionControl.log,
+# crash backups, ...). "Newest .log" routinely picks the wrong one — always
+# prefer the main editor log; VerseBuild lines only ever appear there.
+_MAIN_LOG_NAME = "UnrealEditorFortnite.log"
+
+# Build result markers. The editor logs LOCALIZED lines — a Russian UEFN
+# writes "VerseBuild: УСПЕШНО — сборка завершена" — so English-only patterns
+# report UNKNOWN forever on non-English machines.
+_BUILD_SUCCESS_PAT = re.compile(
+    r'(VerseBuild.*(?:SUCCESS|УСПЕШНО)|LogSolLoadCompiler.*finished.*SUCCESS|'
+    r'LogSolaris.*VerseBuild.*SUCCESS)',
+    re.IGNORECASE,
+)
+_BUILD_FAILED_PAT = re.compile(
+    r'(VerseBuild.*(?:FAIL|ERROR|ОШИБК|СБОЙ)|LogSolLoadCompiler.*finished.*(?:FAIL|ERROR))',
+    re.IGNORECASE,
+)
+
+
+def _pick_build_log(log_files):
+    """Prefer the main editor log over whatever was modified last."""
+    for p in log_files:
+        if os.path.basename(p).lower() == _MAIN_LOG_NAME.lower():
+            return p
+    return max(log_files, key=os.path.getmtime)
+
+
 class VerseBuildService:
     @staticmethod
     def find_uefn_cmd():
@@ -210,7 +238,7 @@ def verse_patch_errors(verse_file: str = "", **kwargs) -> dict:
         return {"status": "no_log", "message": "No log files found.",
                 "errors": [], "files": {}, "build_status": "UNKNOWN"}
 
-    latest_log = max(log_files, key=os.path.getmtime)
+    latest_log = _pick_build_log(log_files)
 
     with open(latest_log, "r", encoding="utf-8", errors="ignore") as f:
         log_lines = f.readlines()
@@ -222,18 +250,9 @@ def verse_patch_errors(verse_file: str = "", **kwargs) -> dict:
         r'([^\s]+\.verse)\((\d+)(?::(\d+))?\)\s*:.*?(?:error\s+)?(.+)',
         re.IGNORECASE
     )
-    # Build status patterns -- covers both Output Log format and .log file format:
-    #   Output Log:  "VerseBuild: SUCCESS -- Build complete."
-    #   .log file:   "LogSolLoadCompiler: ... finished: SUCCESS."
-    #   .log file:   "LogSolaris: ... VerseBuild SUCCESS"
-    success_pattern = re.compile(
-        r'(VerseBuild.*SUCCESS|LogSolLoadCompiler.*finished.*SUCCESS|LogSolaris.*VerseBuild.*SUCCESS)',
-        re.IGNORECASE
-    )
-    failed_pattern = re.compile(
-        r'(VerseBuild.*(?:FAIL|ERROR)|LogSolLoadCompiler.*finished.*(?:FAIL|ERROR))',
-        re.IGNORECASE
-    )
+    # Build status patterns — shared, localized-aware (see module top).
+    success_pattern = _BUILD_SUCCESS_PAT
+    failed_pattern = _BUILD_FAILED_PAT
     # LogSolaris error lines (another common pattern)
     solaris_error   = re.compile(r'LogSolaris.*Error.*\.verse', re.IGNORECASE)
 
@@ -265,11 +284,13 @@ def verse_patch_errors(verse_file: str = "", **kwargs) -> dict:
     warning_count = 0
 
     for line in log_lines:
+        # Track the LAST marker in file order — a session log holds many
+        # builds, and "any SUCCESS wins" would mask every failure after the
+        # first green build of the session.
         if success_pattern.search(line):
             build_status = "SUCCESS"
         elif failed_pattern.search(line):
-            if build_status != "SUCCESS":
-                build_status = "FAILED"
+            build_status = "FAILED"
 
         m = error_pattern.search(line)
         if m:
@@ -438,7 +459,7 @@ def verse_build_status(stale_threshold_sec: float = 300.0, **kwargs) -> dict:
         return {"status": "no_log", "build_status": "UNKNOWN",
                 "error_count": 0, "stale": True, "tip": "No log files found."}
 
-    latest_log = max(log_files, key=os.path.getmtime)
+    latest_log = _pick_build_log(log_files)
     log_mtime = os.path.getmtime(latest_log)
     age_sec = time.time() - log_mtime
     is_stale = age_sec > stale_threshold_sec
@@ -448,14 +469,8 @@ def verse_build_status(stale_threshold_sec: float = 300.0, **kwargs) -> dict:
     build_status = "UNKNOWN"
     error_count = 0
 
-    success_pat = re.compile(
-        r'(VerseBuild.*SUCCESS|LogSolLoadCompiler.*finished.*SUCCESS|LogSolaris.*VerseBuild.*SUCCESS)',
-        re.IGNORECASE
-    )
-    failed_pat = re.compile(
-        r'(VerseBuild.*(?:FAIL|ERROR)|LogSolLoadCompiler.*finished.*(?:FAIL|ERROR))',
-        re.IGNORECASE
-    )
+    success_pat = _BUILD_SUCCESS_PAT
+    failed_pat = _BUILD_FAILED_PAT
     error_line_pat = re.compile(
         r'[^\s]+\.verse\(\d+(?::\d+)?\)\s*:.*(?:error\s+)?.+',
         re.IGNORECASE
@@ -464,11 +479,11 @@ def verse_build_status(stale_threshold_sec: float = 300.0, **kwargs) -> dict:
     try:
         with open(latest_log, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
+                # Last marker in file order wins — see verse_patch_errors.
                 if success_pat.search(line):
                     build_status = "SUCCESS"
                 elif failed_pat.search(line):
-                    if build_status != "SUCCESS":
-                        build_status = "FAILED"
+                    build_status = "FAILED"
                 if error_line_pat.search(line):
                     error_count += 1
     except Exception as e:
