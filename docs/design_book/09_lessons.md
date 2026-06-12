@@ -95,3 +95,31 @@ every wall "buried by its own height". Ground/surface traces around an actor
 must pass ignore=[actor]. After the fix the same lint immediately caught two
 REAL duplicate walls (lobby connectors stacked on maze boundary) — lint the
 build after every generation pass.
+
+## L14 — The validator allowlist is PROJECT-SCOPED (2026-06-13)
+
+The broad "/Game/Creative + /Game/Packages are publishable" rule was wrong:
+a live validation dump flagged /Game/Creative/BuildingActors/* (JungleTemple)
+and /Game/Packages/Fortress_Transylvania/* while passing *_Assets galleries,
+/Engine/BasicShapes, project-own content, and packs already added to the
+project (DS_Fortnight). Allowed = galleries + engine + own content + packs
+REGISTERED to this project. The only reliable oracle is hand-placed content:
+when the validator bites, ask the user to drag exemplar pieces into the level
+and run palette_from_selection(learn=True) — it samples their paths AND
+extends the allowlist (config publishable.extra_prefixes). Replacement
+strategy that always works: /Engine/BasicShapes/Cube scaled to wall
+dimensions + a dark Material created in the PROJECT mount (own content is
+always legal) — the rebuilt maze used exactly this.
+
+## L15 — Geometric lint needs support-aware ray logic (2026-06-13)
+
+Three live false-positive classes fixed in one session:
+1. floating: a single center ray flags roofs/bridges that legitimately span —
+   use 5 rays (center + 4 inset corners), supported if ANY touches.
+2. floating: starting the ray below the bbox bottom skips a flush support
+   surface — start at bottom + 1.
+3. buried: tracing from the sky hits ceilings above indoor actors, and a
+   surface AT the actor's top is something RESTING on it (roof on wall) —
+   trace from top + 1 and require the hit to be clearly below the top.
+After the fixes the same lint caught REAL errors: decor clipped into walls
+and a statue placed outside the lobby. Lint, fix, re-lint — every pass.

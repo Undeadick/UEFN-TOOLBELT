@@ -722,20 +722,55 @@ _CATALOG_NAME_PREFIXES = (
 # JSON from disk on every query. Invalidated by file mtime.
 _catalog_cache: Dict[str, Any] = {"mtime": None, "data": None}
 
-# Namespaces the UEFN AssetReferenceRestrictions validator accepts in user maps
-# (verified empirically 2026-06: hand-placed actors reference only these).
-# Everything else in the mounted library — e.g. /Game/Environments/Sets/* —
-# fails validation and blocks publishing.
-_PUBLISHABLE_PREFIXES = ("/Game/Creative/", "/Game/Packages/", "/Engine/BasicShapes/")
+# Namespaces the UEFN AssetReferenceRestrictions validator accepts in user maps.
+# REVISED 2026-06-13 after a live validation dump disproved the broad rule:
+# /Game/Creative/BuildingActors/* and arbitrary /Game/Packages/* (e.g.
+# Fortress_Transylvania) FAILED validation, while *_Assets gallery mounts,
+# /Engine/BasicShapes, the project's own content, and packs ALREADY added to
+# the project (DS_Fortnight there) passed. The allowlist is PROJECT-SCOPED:
+# only galleries + packs registered to the project are legal. The reliable
+# oracle is hand-placed content — see palette_from_selection (learn=True),
+# which samples user-placed exemplars and extends the allowlist via config
+# key "publishable.extra_prefixes" (comma-separated path prefixes).
+_PUBLISHABLE_PREFIXES = ("/Engine/BasicShapes/",)
+
+
+def _extra_publishable_prefixes() -> tuple:
+    """User/learned allowlist from config (comma-separated prefixes)."""
+    try:
+        from ..core.config import get_config
+        raw = get_config().get("publishable.extra_prefixes", "") or ""
+        return tuple(p.strip() for p in raw.split(",") if p.strip())
+    except Exception:
+        return ()
 
 
 def is_publishable_path(path: str) -> bool:
-    """True if a user map may legally reference this asset path."""
+    """
+    True if a user map may legally reference this asset path.
+
+    Conservative by design: engine primitives, *_Assets gallery mounts, the
+    project's own mount, and learned/config extras. When the validator flags
+    something anyway — sample a hand-placed exemplar with
+    palette_from_selection(learn=True) instead of fighting the validator.
+    """
     if path.startswith(_PUBLISHABLE_PREFIXES):
         return True
+    if path.startswith(_extra_publishable_prefixes()):
+        return True
     parts = path.split("/")
+    root = parts[1] if len(parts) > 1 else ""
     # Gallery plugin mounts: /City_Assets/..., /Suburban_Assets/..., etc.
-    return len(parts) > 1 and parts[1].endswith("_Assets")
+    if root.endswith("_Assets"):
+        return True
+    # The project's own content is always legal
+    try:
+        from ..core import detect_project_mount
+        if root == detect_project_mount():
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _gallery_mounts() -> List[str]:

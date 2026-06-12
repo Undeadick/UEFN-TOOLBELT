@@ -311,15 +311,44 @@ def _find_uefn_project_root() -> str:
         curr = parent
 
 
+def _verse_dir_from_workspace(project_root: str) -> str:
+    """
+    UEFN 41.00+: the project's Verse source package is declared in the
+    <project>.code-workspace — folders[0].path is the package dirPath
+    (normally <project>/Content). The old <project>/Verse layout is NOT
+    compiled anymore (verified live 2026-06-13: files there never reach the
+    build). Read the workspace as the source of truth.
+    """
+    import json as _json
+    try:
+        for entry in os.listdir(project_root):
+            if not entry.endswith(".code-workspace"):
+                continue
+            with open(os.path.join(project_root, entry), encoding="utf-8") as f:
+                ws = _json.load(f)
+            for folder in ws.get("folders", []):
+                p = folder.get("path", "")
+                name = folder.get("name", "")
+                # the source package folder is the one inside the project dir
+                if p and not name.startswith("/Verse") and not name.startswith("/Unreal") \
+                        and not name.startswith("/Fortnite") and "vproject" not in name:
+                    if os.path.isdir(p):
+                        return p
+    except Exception:
+        pass
+    return ""
+
+
 def _find_verse_project_dir() -> str:
     """
     Auto-detect the Verse source directory for the current UEFN project.
 
     Search order:
     1. config verse.project_path (user override — most reliable)
-    2. [ProjectRoot]/Verse/  (standard UEFN layout)
-    3. [ProjectRoot]/*.verse/ (Epic's Verse package folder naming)
-    4. Falls back to Saved/UEFN_Toolbelt/snippets/custom/ with a clear warning
+    2. <project>.code-workspace folders[0] (UEFN 41+ — usually Content/)
+    3. [ProjectRoot]/Verse/  (legacy pre-41 layout)
+    4. [ProjectRoot]/*.verse/ (Epic's Verse package folder naming)
+    5. Falls back to [ProjectRoot]/Content (41+ default)
 
     NOTE: Never uses unreal.Paths.project_dir() — in UEFN that resolves to
     the FortniteGame engine directory, not the user's project directory.
@@ -332,7 +361,12 @@ def _find_verse_project_dir() -> str:
 
     project_root = _find_uefn_project_root()
 
-    # Standard layout
+    # UEFN 41+: workspace declares the real Verse package dir
+    ws_dir = _verse_dir_from_workspace(project_root)
+    if ws_dir:
+        return ws_dir
+
+    # Legacy pre-41 layout
     standard = os.path.join(project_root, "Verse")
     if os.path.isdir(standard):
         return standard
@@ -343,7 +377,10 @@ def _find_verse_project_dir() -> str:
         if entry.endswith(".verse") and os.path.isdir(full):
             return full
 
-    # Fallback — create standard Verse dir in project root
+    # 41+ default — Verse sources live in Content
+    content = os.path.join(project_root, "Content")
+    if os.path.isdir(content):
+        return content
     os.makedirs(standard, exist_ok=True)
     return standard
 
@@ -370,10 +407,19 @@ def run_verse_find_project_path(**kwargs) -> dict:
         return {"status": "ok", "path": user_path, "source": "config"}
 
     project_root = _find_uefn_project_root()
+
+    ws_dir = _verse_dir_from_workspace(project_root)
+    if ws_dir:
+        log_info(f"Verse project path (workspace, UEFN 41+): {ws_dir}")
+        return {"status": "ok", "path": ws_dir, "source": "workspace",
+                "note": "Files added while the editor is open are picked up "
+                        "after the Verse Explorer rescans (restart is the "
+                        "reliable trigger)."}
+
     standard = os.path.join(project_root, "Verse")
     if os.path.isdir(standard):
-        log_info(f"Verse project path (standard): {standard}")
-        return {"status": "ok", "path": standard, "source": "standard"}
+        log_info(f"Verse project path (legacy): {standard}")
+        return {"status": "ok", "path": standard, "source": "legacy"}
 
     for entry in os.listdir(project_root):
         full = os.path.join(project_root, entry)

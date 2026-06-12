@@ -759,3 +759,99 @@ def building_decorate(
     return {"status": "ok", "placed": len(spawner.spawned), "requested": count,
             "failed": failed, "ground_misses": misses, "folder": folder,
             "seed": seed}
+
+
+@register_tool(
+    name="palette_from_selection",
+    category="Procedural",
+    description=(
+        "Build a theme palette from actors the USER placed in the level — the "
+        "validator-proof workflow: anything placed through the editor UI is "
+        "legal by construction. Optionally learns the sampled path prefixes "
+        "into the publishable allowlist."
+    ),
+    tags=["palette", "selection", "sample", "publish", "validator", "learn", "ai"],
+    example='tb.run("palette_from_selection", name="user_kit", roles=["wall", "floor", "door"], learn=True)',
+)
+def palette_from_selection(
+    name: str = "",
+    roles: list = None,
+    overwrite: bool = True,
+    learn: bool = True,
+    **kwargs,
+) -> dict:
+    """
+    The fallback that always works: ask the user to drag exemplar pieces
+    (wall, floor, door, ...) from the Content Browser into the level, select
+    them, then run this. Their asset paths are sampled into a palette —
+    guaranteed to pass AssetReferenceRestrictions because the editor itself
+    placed them.
+
+    Args:
+        name:      Palette name to save.
+        roles:     Role per selected actor IN SELECTION ORDER, e.g.
+                   ["wall", "floor", "door"]. If omitted, roles are guessed
+                   from asset names (wall/floor/door/window/roof/stair/
+                   pillar/trim/corner tokens); unmatched actors are skipped.
+        overwrite: Replace an existing palette of the same name.
+        learn:     Append each sampled asset's path prefix (first 4 segments)
+                   to config "publishable.extra_prefixes" so catalog queries
+                   and validation guards accept that source from now on.
+
+    Returns:
+        palette_save result + {"sampled": {role: path}, "learned": [prefixes]}
+    """
+    sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    selected = list(sub.get_selected_level_actors())
+    if not selected:
+        return {"status": "error",
+                "error": "Nothing selected — select exemplar actors first "
+                         "(drag them from the Content Browser, then select)."}
+
+    sampled: Dict[str, str] = {}
+    for i, actor in enumerate(selected):
+        comps = actor.get_components_by_class(unreal.StaticMeshComponent)
+        mesh = comps[0].static_mesh if comps else None
+        if mesh is None:
+            continue
+        path = mesh.get_path_name().split(".")[0]
+        if roles and i < len(roles):
+            role = roles[i]
+        else:
+            name_l = mesh.get_name().lower()
+            role = next((r for r in ALL_ROLES if r in name_l), None)
+        if role is None or role not in ALL_ROLES:
+            log_warning(f"[palette_from_selection] no role for "
+                        f"'{actor.get_actor_label()}' — skipped")
+            continue
+        sampled[role] = path
+
+    if not sampled:
+        return {"status": "error", "error": "No usable StaticMesh actors with "
+                "resolvable roles in the selection."}
+
+    learned = []
+    if learn:
+        try:
+            from ..core.config import get_config
+            cfg = get_config()
+            raw = cfg.get("publishable.extra_prefixes", "") or ""
+            prefixes = [p.strip() for p in raw.split(",") if p.strip()]
+            for path in sampled.values():
+                parts = path.split("/")
+                prefix = "/".join(parts[:4]) + "/" if len(parts) > 4 else path
+                if prefix not in prefixes and not prefix.startswith("/Engine"):
+                    prefixes.append(prefix)
+                    learned.append(prefix)
+            if learned:
+                cfg.set("publishable.extra_prefixes", ",".join(prefixes))
+        except Exception as e:
+            log_warning(f"[palette_from_selection] learn failed: {e}")
+
+    # sampled assets are legal by construction — bypass the static guard
+    result = palette_save(name=name, roles=sampled, overwrite=overwrite,
+                          allow_restricted=True)
+    if result.get("status") == "ok":
+        result["sampled"] = sampled
+        result["learned"] = learned
+    return result

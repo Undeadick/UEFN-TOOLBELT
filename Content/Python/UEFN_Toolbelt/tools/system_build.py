@@ -476,14 +476,28 @@ def verse_build_status(stale_threshold_sec: float = 300.0, **kwargs) -> dict:
         re.IGNORECASE
     )
 
+    marker_time = ""
+    _ts_pat = re.compile(r"^\[(\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2})")
     try:
         with open(latest_log, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 # Last marker in file order wins — see verse_patch_errors.
+                hit = False
                 if success_pat.search(line):
                     build_status = "SUCCESS"
+                    hit = True
                 elif failed_pat.search(line):
                     build_status = "FAILED"
+                    hit = True
+                if hit:
+                    # The marker's OWN timestamp matters — the editor writes
+                    # the log constantly, so file mtime makes a stale build
+                    # marker look fresh (live bug 2026-06-13: a pre-write
+                    # SUCCESS was reported as the result of a build that
+                    # never ran).
+                    m = _ts_pat.match(line)
+                    if m:
+                        marker_time = m.group(1)
                 if error_line_pat.search(line):
                     error_count += 1
     except Exception as e:
@@ -507,6 +521,8 @@ def verse_build_status(stale_threshold_sec: float = 300.0, **kwargs) -> dict:
         "status":       "ok",
         "build_status": build_status,
         "log_modified":  log_modified_iso,
+        "marker_time":   marker_time,   # when the build actually finished
+        "marker_time":   marker_time,
         "stale":         is_stale,
         "stale_seconds": round(age_sec, 1),
         "error_count":   error_count,

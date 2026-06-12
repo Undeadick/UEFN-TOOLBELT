@@ -429,18 +429,29 @@ def map_lint(
     for a, o, e in actors:
         label = a.get_actor_label()
         bottom = o.z - e.z
-        # trace from just under the bbox so we don't hit the actor itself
-        z = trace_ground_z(o.x, o.y, start_z=bottom - 2.0, ignore=[a])
-        if z is not None:
-            gap = bottom - z
-            if gap > float_threshold:
-                floating.append({"actor": label, "air_below_cm": round(gap, 1)})
-        else:
-            # nothing below at all — floating over void
-            floating.append({"actor": label, "air_below_cm": None})
-        # buried: exclude the actor itself or the trace reports its own top (live bug)
-        zs = trace_ground_z(o.x, o.y, start_z=o.z + e.z + 100000.0, ignore=[a])
-        if zs is not None and (zs - bottom) > bury_threshold:
+        # 5 rays (center + 4 inset corners): a roof/bridge legitimately has
+        # air under its CENTER while resting on walls at its edges — a single
+        # center ray flags every spanning piece (live 2026-06-13). Start just
+        # ABOVE the bbox bottom: starting below skips a flush support surface.
+        ix, iy = e.x * 0.8, e.y * 0.8
+        gaps = []
+        for px, py in ((o.x, o.y), (o.x - ix, o.y - iy), (o.x + ix, o.y - iy),
+                       (o.x - ix, o.y + iy), (o.x + ix, o.y + iy)):
+            z = trace_ground_z(px, py, start_z=bottom + 1.0, ignore=[a])
+            gaps.append(None if z is None else bottom - z)
+        supported = any(g is not None and g <= float_threshold for g in gaps)
+        if not supported:
+            real = [g for g in gaps if g is not None]
+            floating.append({"actor": label,
+                             "air_below_cm": round(min(real), 1) if real else None})
+        # buried: trace down from just above the actor TOP (not from the sky —
+        # a ceiling above any indoor actor reads as "terrain above it",
+        # false-burying everything in enclosed rooms; live 2026-06-13).
+        # A surface AT the actor's top is something RESTING on it (a roof on
+        # a wall) — only surfaces clearly below the top mean it is buried.
+        top = o.z + e.z
+        zs = trace_ground_z(o.x, o.y, start_z=top + 1.0, ignore=[a])
+        if zs is not None and (zs - bottom) > bury_threshold and zs < top - 5.0:
             buried.append({"actor": label, "sunken_cm": round(zs - bottom, 1)})
 
         s = a.get_actor_scale3d()

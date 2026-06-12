@@ -1,6 +1,6 @@
 # UEFN Toolbelt — Tool Status & Testing
 
-UEFN Toolbelt contains **370 tools across 35+ modules**. Because many tools actively modify the viewport, spawn actors, or depend on specific Content Browser selections, **the `integration_test.py` suite uses temporary fixtures to automate verification of context-dependent tools.**
+UEFN Toolbelt contains **371 tools across 35+ modules**. Because many tools actively modify the viewport, spawn actors, or depend on specific Content Browser selections, **the `integration_test.py` suite uses temporary fixtures to automate verification of context-dependent tools.**
 
 ### Phase 21 — Complete AI Return Loop
 As of Phase 21, **every registered tool returns a structured `dict`** — `{"status": "ok"/"error", ...}`. Zero `None` returns remain anywhere in the codebase. This means AI agents using the MCP bridge can act on results programmatically: no log parsing, no guessing. The `describe_tool` MCP command was also added for per-tool manifest lookup.
@@ -11,7 +11,7 @@ As of Phase 21, **every registered tool returns a structured `dict`** — `{"sta
 
 This document outlines the current testing status of the toolbelt and categorizes which tools are verified by the automated smoke test, and which require manual verification.
 
-## 🟡 Automated Verification Status: **186 / 370 tools (52% Coverage)**
+## 🟡 Automated Verification Status: **186 / 371 tools (52% Coverage)**
 Integration suite has **115 test sections written** (103 verified live + 12 Batch 9 written, pending live UEFN run).
 
 > **Coverage gap:** 75 tools were added after v1.6.0 (zones, stamps, actor org, proximity placement, advanced alignment, signs, audio, post-process, level health, config, lighting extended, world state). Batch 9 integration tests are written and syntax-checked — pending one live UEFN run to confirm green.
@@ -69,9 +69,10 @@ These tools do not require any actors to be selected or a specific level to be o
 | `screenshot_orbit` | ⚠️ deprecated on low-VRAM | in-engine capture OOM-crashes 6GB GPUs — use scripts/capture_uefn_window.ps1 |
 | bridge `spawn_actors_bulk` | ✅ live | 24-actor ring, exact rotations, single-undo revert |
 | `scripts/build_verse.ps1` | ✅ live | Ctrl+Shift+B trigger → VerseBuild УСПЕШНО detected by verse_build_status |
-| `map_lint` | 🟡 written | geometric QA: floaters/buried/clipping/scale — pending live run |
+| `map_lint` | ✅ live | battle-tested on the maze build: 3 false-positive classes fixed, then caught real duplicate walls + decor clipping |
 | `kit_metrics` | 🟡 written | per-kit grid + role medians from measured geometry — pending live run |
-| mcp `design_book_search` / `design_book_chapter` | 🟡 written | KB search over docs/design_book — pending Claude Code restart |
+| mcp `design_book_search` / `design_book_chapter` | ✅ live | consulted during the maze build session |
+| `palette_from_selection` | ✅ live (error path) | validator-proof sampling of user-placed exemplars + allowlist learning — full flow needs a user selection |
 
 ---
 
@@ -232,7 +233,7 @@ The `toolbelt_integration_test` tool bridges the gap between pure code checks an
 4. Verifies the result (properties, file outputs)
 5. Cleans up with a single `undo_transaction`
 
-**Current Integration Coverage (370 tools — 115 sections written, 103 live-verified):**
+**Current Integration Coverage (371 tools — 115 sections written, 103 live-verified):**
 
 > ✅ = Confirmed passing in live UEFN
 > 🔵 = Written + syntax-checked, pending first live run (Batch 9)
@@ -280,7 +281,7 @@ The `toolbelt_integration_test` tool bridges the gap between pure code checks an
 
 **What the smoke test proves:**
 - All modules import and register without errors
-- All 370 tools register into the registry with valid metadata
+- All 371 tools register into the registry with valid metadata
 - Safe tools execute end-to-end and return correct results
 - MCP bridge, PySide6, and Verse infrastructure all functional
 
