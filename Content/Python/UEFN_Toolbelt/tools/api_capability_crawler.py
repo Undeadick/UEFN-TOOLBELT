@@ -682,3 +682,407 @@ def device_catalog_scan(
         "path":          out_path,
         "repo_path":     repo_path or "",
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Asset Catalog — the full Fortnite content palette
+#  (StaticMesh / Materials / Niagara FX / Audio — not just device Blueprints)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Class groups the scanner knows how to catalog. Keys are the user-facing
+# group names accepted by asset_catalog_scan(groups=[...]).
+_CATALOG_CLASS_GROUPS: Dict[str, List[str]] = {
+    "meshes":    ["StaticMesh"],
+    "materials": ["Material", "MaterialInstanceConstant"],
+    "fx":        ["NiagaraSystem", "ParticleSystem"],
+    "audio":     ["SoundWave", "SoundCue"],
+    "textures":  ["Texture2D"],
+}
+
+# Script module for each class — needed for the UE5.1+ class_paths filter
+# fallback when class_names is rejected by the running engine build.
+_CATALOG_CLASS_MODULE: Dict[str, str] = {
+    "StaticMesh":               "/Script/Engine",
+    "Material":                 "/Script/Engine",
+    "MaterialInstanceConstant": "/Script/Engine",
+    "NiagaraSystem":            "/Script/Niagara",
+    "ParticleSystem":           "/Script/Engine",
+    "SoundWave":                "/Script/Engine",
+    "SoundCue":                 "/Script/Engine",
+    "Texture2D":                "/Script/Engine",
+}
+
+# Asset name prefixes stripped before tokenizing (Epic naming conventions).
+_CATALOG_NAME_PREFIXES = (
+    "SM_", "SK_", "M_", "MI_", "MF_", "NS_", "P_", "PS_",
+    "T_", "S_", "SW_", "SC_", "A_", "BP_",
+)
+
+# In-process cache for asset_catalog_query — avoids re-reading a multi-MB
+# JSON from disk on every query. Invalidated by file mtime.
+_catalog_cache: Dict[str, Any] = {"mtime": None, "data": None}
+
+
+def _catalog_json_path() -> str:
+    saved_dir = os.path.join(unreal.Paths.project_saved_dir(), "UEFN_Toolbelt")
+    os.makedirs(saved_dir, exist_ok=True)
+    return os.path.join(saved_dir, "asset_catalog.json")
+
+
+def _catalog_tag(asset, tag_name: str):
+    """Read one Asset Registry tag as a string — never loads the asset."""
+    try:
+        v = asset.get_tag_value(tag_name)
+        if v is None:
+            return None
+        s = str(v)
+        return s if s and s != "None" else None
+    except Exception:
+        return None
+
+
+def _catalog_parse_size(approx: str):
+    """Parse the StaticMesh 'ApproxSize' tag ('128x64x256') into [x, y, z]."""
+    try:
+        parts = [int(float(p)) for p in approx.lower().split("x")]
+        return parts if len(parts) == 3 else None
+    except Exception:
+        return None
+
+
+def _catalog_name_tokens(name: str) -> List[str]:
+    """Tokenize an asset name for keyword search: strip prefix, split, lowercase."""
+    import re as _re
+    n = name
+    for p in _CATALOG_NAME_PREFIXES:
+        if n.startswith(p):
+            n = n[len(p):]
+            break
+    tokens: List[str] = []
+    for part in _re.split(r"[_\-\s.]+", n):
+        for tok in _re.findall(r"[A-Z]+[a-z]*|[a-z]+", part):
+            if len(tok) >= 3:
+                tokens.append(tok.lower())
+    return tokens
+
+
+def _catalog_ar_query(ar, pkg_path: str, cls: str) -> list:
+    """One batched Asset Registry query: (package path × class). Returns AssetData list."""
+    # Proven path in this UEFN build first (device_catalog_scan uses class_names),
+    # then the UE5.1+ class_paths API as fallback.
+    try:
+        flt = unreal.ARFilter(
+            package_paths=[pkg_path],
+            class_names=[cls],
+            recursive_paths=True,
+        )
+        return list(ar.get_assets(flt))
+    except Exception:
+        pass
+    try:
+        flt = unreal.ARFilter(
+            package_paths=[pkg_path],
+            class_paths=[unreal.TopLevelAssetPath(_CATALOG_CLASS_MODULE.get(cls, "/Script/Engine"), cls)],
+            recursive_paths=True,
+        )
+        return list(ar.get_assets(flt))
+    except Exception as e:
+        unreal.log_warning(f"[asset_catalog_scan]   {pkg_path} × {cls}: query failed ({e})")
+        return []
+
+
+def _catalog_build_entry(asset, cls: str):
+    """Build one compact catalog entry from AssetData tags only — zero asset loads."""
+    try:
+        name = str(asset.asset_name)
+        path = str(asset.package_name)
+    except Exception:
+        return None
+    entry: Dict[str, Any] = {"name": name, "path": path}
+
+    if cls == "StaticMesh":
+        tris = _catalog_tag(asset, "Triangles")
+        if tris:
+            try:
+                entry["tris"] = int(float(tris))
+            except Exception:
+                pass
+        approx = _catalog_tag(asset, "ApproxSize")
+        if approx:
+            size = _catalog_parse_size(approx)
+            if size:
+                entry["size"] = size
+        nanite = _catalog_tag(asset, "NaniteEnabled")
+        if nanite == "True":
+            entry["nanite"] = True
+    elif cls in ("SoundWave", "SoundCue"):
+        dur = _catalog_tag(asset, "Duration")
+        if dur:
+            try:
+                entry["duration"] = round(float(dur), 2)
+            except Exception:
+                pass
+    elif cls == "Texture2D":
+        dims = _catalog_tag(asset, "Dimensions")
+        if dims:
+            entry["dims"] = dims
+
+    return entry
+
+
+@register_tool(
+    name="asset_catalog_scan",
+    category="API Explorer",
+    description=(
+        "Catalog the full Fortnite content library by asset class — StaticMeshes, "
+        "Materials, Niagara FX, Audio — via batched Asset Registry queries. "
+        "Builds the visual palette Claude uses to construct non-primitive maps."
+    ),
+    tags=["asset", "catalog", "mesh", "material", "fx", "audio", "scan", "registry", "ai", "palette"],
+    example='tb.run("asset_catalog_scan", groups=["meshes"], max_per_class=5000)',
+)
+def asset_catalog_scan(
+    groups: list = None,
+    extra_paths: list = None,
+    max_per_class: int = 0,
+    **kwargs,
+) -> dict:
+    """
+    Scan the Asset Registry for every content asset of the requested classes
+    across the Fortnite library mounts — not just the current level or project.
+
+    Unlike device_catalog_scan (Blueprints/devices only), this catalogs the
+    *visual* palette: meshes with triangle counts and bounding sizes, materials,
+    Niagara effects, and audio with durations — all read from Asset Registry
+    tags without loading a single asset (pak-safe, Quirk #32 aware: queries are
+    batched per (path × class), never a whole-mount enumeration).
+
+    Args:
+        groups:        Class groups to scan. Any of: "meshes", "materials",
+                       "fx", "audio", "textures". Default: meshes, materials,
+                       fx, audio (textures excluded — usually huge and rarely
+                       needed for layout work).
+        extra_paths:   Additional package paths to search (default: /Fortnite,
+                       /Game, /FortniteGame).
+        max_per_class: Safety cap per class per path. 0 = unlimited. Use a few
+                       thousand on the first run in a new project to gauge scale.
+
+    Returns:
+        {"status": "ok", "counts": {class: n}, "total": int, "path": str}
+
+    Output: Saved/UEFN_Toolbelt/asset_catalog.json (compact JSON — query it
+    with asset_catalog_query, do not read it whole over MCP).
+    """
+    from datetime import datetime
+
+    if groups is None:
+        groups = ["meshes", "materials", "fx", "audio"]
+    bad = [g for g in groups if g not in _CATALOG_CLASS_GROUPS]
+    if bad:
+        return {"status": "error",
+                "error": f"Unknown group(s) {bad}. Valid: {sorted(_CATALOG_CLASS_GROUPS)}"}
+
+    classes: List[str] = []
+    for g in groups:
+        classes.extend(_CATALOG_CLASS_GROUPS[g])
+
+    search_paths = list(_SEARCH_PATHS)
+    if extra_paths:
+        search_paths.extend(extra_paths)
+    seen: Set[str] = set()
+    search_paths = [p for p in search_paths if not (p in seen or seen.add(p))]
+
+    unreal.log(f"[asset_catalog_scan] Scanning {len(classes)} classes × "
+               f"{len(search_paths)} paths (max_per_class={max_per_class or 'unlimited'})...")
+
+    ar = unreal.AssetRegistryHelpers.get_asset_registry()
+    assets_by_class: Dict[str, List[dict]] = {}
+    seen_paths: Set[str] = set()
+
+    for cls in classes:
+        entries = assets_by_class.setdefault(cls, [])
+        for pkg_path in search_paths:
+            batch = _catalog_ar_query(ar, pkg_path, cls)
+            unreal.log(f"[asset_catalog_scan]   {pkg_path} × {cls}: {len(batch)} assets")
+            added = 0
+            for asset in batch:
+                if max_per_class and added >= max_per_class:
+                    unreal.log(f"[asset_catalog_scan]   {pkg_path} × {cls}: "
+                               f"capped at {max_per_class}")
+                    break
+                entry = _catalog_build_entry(asset, cls)
+                if entry is None or entry["path"] in seen_paths:
+                    continue
+                seen_paths.add(entry["path"])
+                entries.append(entry)
+                added += 1
+            del batch
+
+    counts = {cls: len(v) for cls, v in assets_by_class.items()}
+    total = sum(counts.values())
+
+    catalog = {
+        "scanned_at":   datetime.now().isoformat(),
+        "search_paths": search_paths,
+        "groups":       groups,
+        "counts":       counts,
+        "assets":       {cls: sorted(v, key=lambda x: x["name"])
+                         for cls, v in assets_by_class.items()},
+    }
+
+    out_path = _catalog_json_path()
+    # Compact separators — a full library scan can hold 100k+ entries and
+    # indent=2 would triple the file size.
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(catalog, f, separators=(",", ":"))
+
+    _catalog_cache["mtime"] = None   # force reload on next query
+
+    unreal.log(f"[asset_catalog_scan] ✓ {total} assets cataloged → {out_path}")
+    for cls, n in sorted(counts.items(), key=lambda x: -x[1]):
+        unreal.log(f"  [{cls:24s}] {n:6d}")
+
+    return {"status": "ok", "counts": counts, "total": total, "path": out_path}
+
+
+@register_tool(
+    name="asset_catalog_query",
+    category="API Explorer",
+    description=(
+        "Search the cached asset catalog (asset_catalog.json) by keywords, class, "
+        "triangle budget, and size — returns compact entries ready for spawn_actor. "
+        "Run asset_catalog_scan first."
+    ),
+    tags=["asset", "catalog", "query", "search", "mesh", "material", "ai", "palette"],
+    example='tb.run("asset_catalog_query", query="wall stone", class_filter="StaticMesh", max_results=20)',
+)
+def asset_catalog_query(
+    query: str = "",
+    class_filter: str = "",
+    path_filter: str = "",
+    max_tris: int = 0,
+    max_size: int = 0,
+    max_results: int = 50,
+    sort: str = "name",
+    stats_only: bool = False,
+    measure: bool = False,
+    **kwargs,
+) -> dict:
+    """
+    Query the asset catalog produced by asset_catalog_scan — without re-scanning
+    and without ever loading assets. This is the AI selection layer: find the
+    right wall/tree/rock/material by keyword, filtered to a sane polygon and
+    size budget, and feed the returned path straight into spawn_actor.
+
+    Args:
+        query:        Space-separated keywords — ALL must appear in the asset
+                      name or path (case-insensitive). E.g. "wall stone".
+        class_filter: Substring match on the asset class, e.g. "StaticMesh",
+                      "Material", "Niagara", "Sound".
+        path_filter:  Substring that must appear in the package path, e.g.
+                      "/Fortnite/Environments".
+        max_tris:     Skip meshes with more triangles than this. 0 = no limit.
+        max_size:     Skip meshes whose largest bounding dimension (cm) exceeds
+                      this. 0 = no limit.
+        max_results:  Cap on returned entries (default 50).
+        sort:         "name" | "tris" (ascending) | "size" (largest dim, asc).
+        stats_only:   Return only per-class counts and the most frequent name
+                      tokens among matches — use this first to orient in an
+                      unfamiliar library before pulling entries.
+        measure:      Load each RETURNED StaticMesh (max_results of them, never
+                      the whole catalog) and fill real "size" [x,y,z] cm,
+                      "tris", and "slots". Needed in UEFN: the cooked pak
+                      Asset Registry strips Triangles/ApproxSize tags, so
+                      scan-time metadata is empty there (~45 ms per asset).
+
+    Returns:
+        {"status": "ok", "total_matches": int, "shown": int, "results": [...],
+         "counts_by_class": {...}}
+    """
+    cat_path = _catalog_json_path()
+    if not os.path.isfile(cat_path):
+        return {"status": "error",
+                "error": "No asset catalog found. Run asset_catalog_scan first."}
+
+    mtime = os.path.getmtime(cat_path)
+    if _catalog_cache["mtime"] != mtime:
+        with open(cat_path, encoding="utf-8") as f:
+            _catalog_cache["data"] = json.load(f)
+        _catalog_cache["mtime"] = mtime
+    data = _catalog_cache["data"]
+
+    tokens = [t for t in query.lower().split() if t]
+    cls_f  = class_filter.lower()
+    path_f = path_filter.lower()
+
+    matches: List[dict] = []
+    counts_by_class: Dict[str, int] = {}
+    token_freq: Dict[str, int] = {}
+
+    for cls, entries in data.get("assets", {}).items():
+        if cls_f and cls_f not in cls.lower():
+            continue
+        for e in entries:
+            hay = (e["name"] + " " + e["path"]).lower()
+            if tokens and not all(t in hay for t in tokens):
+                continue
+            if path_f and path_f not in e["path"].lower():
+                continue
+            if max_tris and e.get("tris", 0) > max_tris:
+                continue
+            if max_size and e.get("size") and max(e["size"]) > max_size:
+                continue
+            counts_by_class[cls] = counts_by_class.get(cls, 0) + 1
+            if stats_only:
+                for tok in _catalog_name_tokens(e["name"]):
+                    token_freq[tok] = token_freq.get(tok, 0) + 1
+            else:
+                matches.append({**e, "class": cls})
+
+    total = sum(counts_by_class.values())
+
+    if stats_only:
+        top_tokens = sorted(token_freq.items(), key=lambda x: -x[1])[:100]
+        return {"status": "ok", "total_matches": total,
+                "counts_by_class": counts_by_class,
+                "top_tokens": dict(top_tokens),
+                "scanned_at": data.get("scanned_at", "")}
+
+    if sort == "tris":
+        matches.sort(key=lambda e: e.get("tris", 0))
+    elif sort == "size":
+        matches.sort(key=lambda e: max(e["size"]) if e.get("size") else 0)
+    else:
+        matches.sort(key=lambda e: e["name"])
+
+    shown = matches[:max_results]
+
+    if measure:
+        for e in shown:
+            if "size" in e and "tris" in e:
+                continue
+            try:
+                obj = unreal.EditorAssetLibrary.load_asset(e["path"])
+            except Exception:
+                obj = None
+            if obj is None or not isinstance(obj, unreal.StaticMesh):
+                continue
+            try:
+                bb = obj.get_bounding_box()
+                e["size"] = [round(bb.max.x - bb.min.x),
+                             round(bb.max.y - bb.min.y),
+                             round(bb.max.z - bb.min.z)]
+            except Exception:
+                pass
+            try:
+                e["tris"] = obj.get_num_triangles(0)
+            except Exception:
+                pass
+            try:
+                e["slots"] = obj.get_num_sections(0)
+            except Exception:
+                pass
+
+    return {"status": "ok", "total_matches": total, "shown": len(shown),
+            "counts_by_class": counts_by_class, "results": shown,
+            "scanned_at": data.get("scanned_at", "")}
