@@ -299,6 +299,7 @@ def building_generate(
     door_side: str = "south",
     folder: str = "Building",
     roof_style: str = "gable",
+    roof_flip: bool = False,
     window_every: int = 0,
     dry_run: bool = False,
     focus: bool = False,
@@ -326,9 +327,11 @@ def building_generate(
         folder:    World Outliner folder for all spawned actors.
         roof_style: "gable" (default) — two slopes rising to a center ridge,
                    rows stepped in height, mirrored north/south; the optional
-                   "roof_cap" role tiles along the ridge. Assumes the roof
-                   piece slopes UP toward its local +Y at yaw 0. "flat" — the
-                   old single-plane tiling (right for genuinely flat slabs).
+                   "roof_cap" role tiles along the ridge. "flat" — the old
+                   single-plane tiling (right for genuinely flat slabs).
+        roof_flip: Flip both slopes 180°. Use when a kit's roof piece slopes
+                   the other way and the result opens upward like a V —
+                   check a gable-end screenshot after building.
         window_every: Every Nth perimeter wall segment becomes the "window"
                    piece (if the palette defines one). 0 = no windows.
         dry_run:   Plan only — return piece counts and bounds, spawn nothing.
@@ -445,16 +448,20 @@ def building_generate(
             # apart must step up by run * (rz/ry) — stepping a full rz leaves
             # air gaps between rows (seen live on DestroyedHouse_Roof, 35.6°).
             rise = run * (rz / ry)
+            # Slope orientation, verified live on DestroyedHouse_Roof: at yaw 0
+            # the piece rises toward local -Y. The HIGH edge must face the
+            # ridge, so the south side takes yaw 180 and the north side yaw 0.
+            # If a kit's roof comes out as a V (slopes opening upward), its
+            # local slope runs the other way — use roof_flip=True.
+            s_yaw, n_yaw = (0.0, 180.0) if roof_flip else (180.0, 0.0)
             for i in range(rnx):
                 x = ox + (i + 0.5) * rsx
                 for j in range(nrows):
                     zc = top_z + j * rise + rz / 2.0
-                    # south slope faces the ridge (+Y at yaw 0)
                     plan.append((roof, [x, oy + (j + 0.5) * run, zc],
-                                 0.0, f"BLD_Roof_S{i}_{j}"))
-                    # north slope mirrored
+                                 s_yaw, f"BLD_Roof_S{i}_{j}"))
                     plan.append((roof, [x, oy + d_total - (j + 0.5) * run, zc],
-                                 180.0, f"BLD_Roof_N{i}_{j}"))
+                                 n_yaw, f"BLD_Roof_N{i}_{j}"))
             if roof_cap is not None:
                 cap_x = max(float(roof_cap["size"][0]), 10.0)
                 # Where the two slopes actually meet: total rise over half depth.
@@ -467,6 +474,33 @@ def building_generate(
                     plan.append((roof_cap,
                                  [ox + (i + 0.5) * csx, cy, ridge_z],
                                  0.0, f"BLD_Cap_{i}"))
+
+            # Gable-end fill — without it the east/west ends are open
+            # triangles and the attic shows the slope undersides (reads as a
+            # V roof from the end). Place attic wall segments wherever a full
+            # wall fits under the slope: available height at distance d from
+            # the nearer long edge is d * rz/ry.
+            pitch_ratio = rz / ry
+            for end_x, end_yaw in ((ox, 90.0), (ox + w_total, 270.0)):
+                for r in range(3):                      # attic storeys
+                    need = (r + 1) * wall_h
+                    placed_any = False
+                    for j in range(depth):
+                        y0 = oy + j * cell
+                        y1 = y0 + cell
+                        # nearest-long-edge distance across the segment span
+                        d_edge = min(y0 - oy, d_total - (y1 - oy))
+                        if d_edge < 0:
+                            continue
+                        avail = min(d_edge * pitch_ratio, nrows * rise)
+                        if avail + 1.0 < need:
+                            continue
+                        z = top_z + r * wall_h + wall_h / 2.0
+                        plan.append((wall, [end_x, (y0 + y1) / 2.0, z],
+                                     end_yaw, f"BLD_Gable_{r}_{j}"))
+                        placed_any = True
+                    if not placed_any:
+                        break
         else:
             rny = max(1, round(d_total / ry))
             rsy = d_total / rny
