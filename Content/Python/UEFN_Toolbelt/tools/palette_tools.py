@@ -40,7 +40,7 @@ from ..registry import register_tool
 # Roles a palette may define. Only ROLE_REQUIRED are mandatory for
 # building_generate — everything else upgrades the result when present.
 ROLE_REQUIRED = ("floor", "wall")
-ROLE_OPTIONAL = ("door", "roof", "corner", "window", "stairs", "pillar", "trim")
+ROLE_OPTIONAL = ("door", "roof", "roof_cap", "corner", "window", "stairs", "pillar", "trim")
 ALL_ROLES = ROLE_REQUIRED + ROLE_OPTIONAL
 
 _SIDES = ("south", "north", "west", "east")
@@ -298,6 +298,8 @@ def building_generate(
     location: list = None,
     door_side: str = "south",
     folder: str = "Building",
+    roof_style: str = "gable",
+    window_every: int = 0,
     dry_run: bool = False,
     focus: bool = False,
     **kwargs,
@@ -322,6 +324,13 @@ def building_generate(
                    Default: current viewport camera position (z kept).
         door_side: "south" | "north" | "west" | "east" — ground-floor door wall.
         folder:    World Outliner folder for all spawned actors.
+        roof_style: "gable" (default) — two slopes rising to a center ridge,
+                   rows stepped in height, mirrored north/south; the optional
+                   "roof_cap" role tiles along the ridge. Assumes the roof
+                   piece slopes UP toward its local +Y at yaw 0. "flat" — the
+                   old single-plane tiling (right for genuinely flat slabs).
+        window_every: Every Nth perimeter wall segment becomes the "window"
+                   piece (if the palette defines one). 0 = no windows.
         dry_run:   Plan only — return piece counts and bounds, spawn nothing.
         focus:     Jump the viewport to an overhead view after generation.
 
@@ -348,6 +357,8 @@ def building_generate(
     floor = roles["floor"]
     door = roles.get("door")
     roof = roles.get("roof")
+    roof_cap = roles.get("roof_cap")
+    window = roles.get("window")
 
     cell = float(wall["size"][0])
     wall_h = float(wall["size"][2])
@@ -390,7 +401,9 @@ def building_generate(
 
     def wall_piece(side: str, idx: int, storey: int):
         use_door = (door is not None and storey == 0 and side == door_side and idx == door_index)
-        info = door if use_door else wall
+        use_window = (not use_door and window is not None and window_every > 0
+                      and idx % window_every == 0)
+        info = door if use_door else (window if use_window else wall)
         z = base_z + storey * wall_h + float(info["size"][2]) / 2.0
         if side == "south":
             pos, yaw = [ox + (idx + 0.5) * cell, oy, z], 0.0
@@ -400,7 +413,7 @@ def building_generate(
             pos, yaw = [ox, oy + (idx + 0.5) * cell, z], 90.0
         else:  # east
             pos, yaw = [ox + w_total, oy + (idx + 0.5) * cell, z], 270.0
-        tag = "Door" if use_door else "Wall"
+        tag = "Door" if use_door else ("Window" if use_window else "Wall")
         plan.append((info, pos, yaw, f"BLD_{tag}_{side}_{storey}_{idx}"))
 
     for storey in range(floors):
@@ -411,21 +424,57 @@ def building_generate(
             wall_piece("west", j, storey)
             wall_piece("east", j, storey)
 
-    # Roof — tile at the top wall plane, bbox bottom resting on it.
+    # Roof — gable (two stepped slopes meeting at a center ridge) or flat tiling.
     if roof is not None:
         rx, ry, rz = (max(float(roof["size"][0]), 10.0),
                       max(float(roof["size"][1]), 10.0),
                       float(roof["size"][2]))
         top_z = base_z + floors * wall_h
         rnx = max(1, round(w_total / rx))
-        rny = max(1, round(d_total / ry))
         rsx = w_total / rnx
-        rsy = d_total / rny
-        for i in range(rnx):
-            for j in range(rny):
-                plan.append((roof,
-                             [ox + (i + 0.5) * rsx, oy + (j + 0.5) * rsy, top_z + rz / 2.0],
-                             0.0, f"BLD_Roof_{i}_{j}"))
+
+        if roof_style == "gable":
+            # Each side covers half the depth; rows step toward the ridge,
+            # rising one piece-height per row. Assumes the piece slopes up
+            # toward local +Y at yaw 0 — verify visually per kit, flip with
+            # roof_style="flat" if the kit's slabs are actually flat.
+            half = d_total / 2.0
+            nrows = max(1, math.ceil(half / ry))
+            run = half / nrows   # slight overlap beats gaps when half % ry != 0
+            # The piece rises rz over ry of horizontal run. Rows placed `run`
+            # apart must step up by run * (rz/ry) — stepping a full rz leaves
+            # air gaps between rows (seen live on DestroyedHouse_Roof, 35.6°).
+            rise = run * (rz / ry)
+            for i in range(rnx):
+                x = ox + (i + 0.5) * rsx
+                for j in range(nrows):
+                    zc = top_z + j * rise + rz / 2.0
+                    # south slope faces the ridge (+Y at yaw 0)
+                    plan.append((roof, [x, oy + (j + 0.5) * run, zc],
+                                 0.0, f"BLD_Roof_S{i}_{j}"))
+                    # north slope mirrored
+                    plan.append((roof, [x, oy + d_total - (j + 0.5) * run, zc],
+                                 180.0, f"BLD_Roof_N{i}_{j}"))
+            if roof_cap is not None:
+                cap_x = max(float(roof_cap["size"][0]), 10.0)
+                # Where the two slopes actually meet: total rise over half depth.
+                ridge_z = top_z + nrows * rise
+                ncap = max(1, round(w_total / cap_x))
+                csx = w_total / ncap
+                for i in range(ncap):
+                    # Straddle the ridge line (bbox centered on it) instead of
+                    # standing on top — caps read as teeth otherwise.
+                    plan.append((roof_cap,
+                                 [ox + (i + 0.5) * csx, cy, ridge_z],
+                                 0.0, f"BLD_Cap_{i}"))
+        else:
+            rny = max(1, round(d_total / ry))
+            rsy = d_total / rny
+            for i in range(rnx):
+                for j in range(rny):
+                    plan.append((roof,
+                                 [ox + (i + 0.5) * rsx, oy + (j + 0.5) * rsy, top_z + rz / 2.0],
+                                 0.0, f"BLD_Roof_{i}_{j}"))
 
     counts: Dict[str, int] = {}
     for _info, _pos, _yaw, label in plan:

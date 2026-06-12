@@ -1207,3 +1207,27 @@ If the user has a folder named `Content` inside `Content/`, the `rel` path natur
 
 **Affected tools:** `physics_list` — reports `physics_capable` (whether the actor has a `StaticMeshComponent`) rather than current on/off state, with an explicit note about the sandbox restriction.
 
+
+---
+
+## Quirk #35 — `unreal.Rotator` Positional Args Are (roll, pitch, yaw), Not (pitch, yaw, roll) (Discovered: June 2026)
+
+**Symptom:** A camera or actor "leans sideways" after Python sets its rotation. `set_level_viewport_camera_info(loc, unreal.Rotator(-45.0, 90.0, 0.0))` — intended as pitch -45, yaw 90 — instead applies **roll -45, pitch 90**: the viewport tilts diagonally and looks straight up.
+
+**Why:** The `unreal.Rotator` constructor's positional order is **(roll, pitch, yaw)** — it follows the C++ `FRotator` memory layout, not the (pitch, yaw, roll) order most UE docs and tooltips use when describing rotations. Confirmed live in UEFN 40.x:
+
+```python
+r = unreal.Rotator(10.0, 20.0, 30.0)
+# r.roll == 10.0, r.pitch == 20.0, r.yaw == 30.0
+```
+
+**The fix — always use keyword arguments:**
+
+```python
+unreal.Rotator(roll=0.0, pitch=-45.0, yaw=90.0)   # ✓ unambiguous
+unreal.Rotator(-45.0, 90.0, 0.0)                  # ✗ rolls the camera sideways
+```
+
+**Wire-format note:** The MCP bridge accepts rotations as `[pitch, yaw, roll]` lists (documented order) and maps them explicitly via `_rotator_from_list()` — never `unreal.Rotator(*rotation)`.
+
+**Affected code (fixed June 2026):** `mcp_bridge.py` (spawn_actor, set_actor_transform, set_viewport_camera), `palette_tools.py` (focus camera, piece spawner), `screenshot_tools.py` (_camera_for_bounds, orbit). Other modules that pass positional Rotators with (pitch, yaw, roll) intent remain suspect — audit before trusting any rotation code.

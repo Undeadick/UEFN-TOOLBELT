@@ -171,6 +171,19 @@ def _serialize(obj: Any) -> Any:
         return repr(obj)
 
 
+def _rotator_from_list(rotation: List[float]) -> unreal.Rotator:
+    """
+    Build a Rotator from the wire format [pitch, yaw, roll].
+
+    unreal.Rotator's POSITIONAL argument order is (roll, pitch, yaw) — passing
+    the wire list positionally silently rolls actors/cameras sideways
+    (confirmed live, June 2026). Always map explicitly.
+    """
+    return unreal.Rotator(roll=float(rotation[2]) if len(rotation) > 2 else 0.0,
+                          pitch=float(rotation[0]),
+                          yaw=float(rotation[1]) if len(rotation) > 1 else 0.0)
+
+
 def _serialize_actor(actor: unreal.Actor) -> dict:
     return {
         "name":     actor.get_name(),
@@ -408,7 +421,7 @@ def _c_spawn_actor(
     label: str = "",
 ) -> dict:
     loc = unreal.Vector(*location) if location else unreal.Vector(0, 0, 0)
-    rot = unreal.Rotator(*rotation) if rotation else unreal.Rotator(0, 0, 0)
+    rot = _rotator_from_list(rotation) if rotation else unreal.Rotator(0, 0, 0)
 
     sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     if asset_path:
@@ -463,7 +476,7 @@ def _c_set_actor_transform(
     if location is not None:
         target.set_actor_location(unreal.Vector(*location), False, False)
     if rotation is not None:
-        target.set_actor_rotation(unreal.Rotator(*rotation), False)
+        target.set_actor_rotation(_rotator_from_list(rotation), False)
     if scale is not None:
         target.set_actor_scale3d(unreal.Vector(*scale))
     return {"actor": _serialize_actor(target)}
@@ -706,7 +719,7 @@ def _c_set_viewport_camera(
 ) -> dict:
     cur_loc, cur_rot = unreal.EditorLevelLibrary.get_level_viewport_camera_info()
     loc = unreal.Vector(*location) if location else cur_loc
-    rot = unreal.Rotator(*rotation) if rotation else cur_rot
+    rot = _rotator_from_list(rotation) if rotation else cur_rot
     unreal.EditorLevelLibrary.set_level_viewport_camera_info(loc, rot)
     return {"location": _serialize(loc), "rotation": _serialize(rot)}
 

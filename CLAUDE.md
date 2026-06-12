@@ -240,7 +240,7 @@ All 366 tools (100%) return `{"status": "ok"/"error", ...}` structured dicts as 
    mount = max(counts, key=counts.get) if counts else "Game"
    ```
    Canonical implementation: `core/__init__.py` → `detect_project_mount()`. Import it with `from ..core import detect_project_mount`. Never reimplement this per-tool.
-6. **Vectors/Rotators** — `unreal.Vector(x, y, z)` · `unreal.Rotator(pitch, yaw, roll)`
+6. **Vectors/Rotators** — `unreal.Vector(x, y, z)` · **Rotator positional order is `(roll, pitch, yaw)`** — NOT (pitch, yaw, roll). Always use keyword args: `unreal.Rotator(roll=0, pitch=-45, yaw=90)`. Positional rotations silently roll cameras/actors sideways. See `docs/UEFN_QUIRKS.md` Quirk #35.
    Pitch = tilt up/down · Yaw = rotate left/right · Roll = spin
 
 ---
