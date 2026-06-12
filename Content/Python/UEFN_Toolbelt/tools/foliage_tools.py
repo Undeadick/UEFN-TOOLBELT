@@ -764,3 +764,143 @@ def run_scatter_road_edge(
 
     log_info(f"[scatter_road_edge] Placed {placed} props along path shoulder.")
     return {"status": "ok", "placed": placed, "samples": len(samples), "folder": folder}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Road surface builder — waypoints → continuous tiled road
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _polyline_station(pts, dist):
+    """Point + heading (deg) at arc distance `dist` along an XY polyline."""
+    walked = 0.0
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        seg = math.hypot(x1 - x0, y1 - y0)
+        if seg <= 0.0:
+            continue
+        if walked + seg >= dist:
+            t = (dist - walked) / seg
+            return (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t,
+                    math.degrees(math.atan2(y1 - y0, x1 - x0)))
+        walked += seg
+    x0, y0 = pts[-2]
+    x1, y1 = pts[-1]
+    return (x1, y1, math.degrees(math.atan2(y1 - y0, x1 - x0)))
+
+
+@register_tool(
+    name="road_build",
+    category="Procedural",
+    description=(
+        "Lay a continuous road surface along a list of XY waypoints: tiles placed "
+        "end-to-end, rotated to the path heading, ground-snapped per tile. "
+        "Combine with scatter_road_edge for shoulders."
+    ),
+    tags=["road", "path", "build", "tile", "procedural", "waypoints", "ai"],
+    example='tb.run("road_build", asset_path="/Game/Packages/DS_Fortnight/SM/Mesh/S_Asphalt_1x1", points=[[0,0],[3000,500],[6000,-500]])',
+)
+def road_build(
+    asset_path: str = "",
+    points: list = None,
+    overlap: float = 10.0,
+    width_scale: float = 1.0,
+    ground_snap: bool = True,
+    z_offset: float = 2.0,
+    base_z: float = 0.0,
+    folder: str = "Road",
+    max_tiles: int = 1000,
+    allow_restricted: bool = False,
+    dry_run: bool = False,
+    **kwargs,
+) -> dict:
+    """
+    Build a drivable/walkable road surface along waypoints.
+
+    The tile's bbox X-length is the step: tiles are laid end-to-end along the
+    polyline, each rotated to the local path heading. Tight curves naturally
+    open small wedge gaps on the outside edge — a slight `overlap` (default
+    10 cm) keeps the surface continuous.
+
+    Args:
+        asset_path:  Road tile StaticMesh (e.g. an asphalt 1x1 from /Game/Packages).
+        points:      [[x, y], ...] or [[x, y, z], ...] waypoints, 2+ entries.
+                     Z values are ignored when ground_snap=True.
+        overlap:     Cm of overlap between consecutive tiles.
+        width_scale: Y-scale applied to each tile (wider/narrower road).
+        ground_snap: Trace terrain under each tile; tiles with no ground
+                     under them are skipped (island edge).
+        z_offset:    Lift above the traced ground to avoid z-fighting.
+        base_z:      Road height when ground_snap=False.
+        folder:      World Outliner folder.
+        max_tiles:   Safety cap.
+        allow_restricted: Permit assets that fail UEFN publish validation.
+        dry_run:     Plan only — tile count and length, no spawning.
+    """
+    from ..core import trace_ground_z
+    from .palette_tools import _measure_role_asset, _Spawner
+
+    if not asset_path:
+        return {"status": "error", "error": "asset_path is required"}
+    if not points or len(points) < 2:
+        return {"status": "error", "error": "points needs at least 2 waypoints [[x,y],...]"}
+
+    if not allow_restricted:
+        from .api_capability_crawler import is_publishable_path
+        if not is_publishable_path(asset_path):
+            return {"status": "error",
+                    "error": f"'{asset_path}' fails UEFN publish validation — pick a "
+                             "publishable tile (asset_catalog_query publishable=True) "
+                             "or pass allow_restricted=True."}
+
+    info = _measure_role_asset(asset_path)
+    if info is None:
+        return {"status": "error", "error": f"Could not load/measure '{asset_path}'"}
+
+    tile_len = max(float(info["size"][0]), 10.0)
+    step = max(tile_len - max(0.0, overlap), 10.0)
+
+    pts = [(float(p[0]), float(p[1])) for p in points]
+    total_len = sum(math.hypot(x1 - x0, y1 - y0)
+                    for (x0, y0), (x1, y1) in zip(pts, pts[1:]))
+    if total_len < 10.0:
+        return {"status": "error", "error": "Path is degenerate (zero length)"}
+
+    n_tiles = min(int(total_len // step) + 1, max_tiles)
+
+    plan = []
+    misses = 0
+    for i in range(n_tiles):
+        x, y, heading = _polyline_station(pts, min(i * step + tile_len / 2.0, total_len))
+        if ground_snap:
+            z = trace_ground_z(x, y)
+            if z is None:
+                misses += 1
+                continue
+            z += z_offset
+        else:
+            z = base_z
+        zc = z + float(info["size"][2]) / 2.0
+        plan.append((info, [x, y, zc], heading, f"ROAD_{i:03d}"))
+
+    if dry_run:
+        return {"status": "ok", "dry_run": True, "planned": len(plan),
+                "skipped_no_ground": misses, "tile_length": tile_len,
+                "path_length": round(total_len, 1)}
+
+    spawner = _Spawner(folder)
+    failed = 0
+    with undo_transaction(f"Toolbelt: road_build x{len(plan)}"):
+        for inf, pos, yaw, label in plan:
+            actor = spawner.place(inf, pos, yaw, label)
+            if actor is None:
+                failed += 1
+            elif width_scale != 1.0:
+                try:
+                    actor.set_actor_scale3d(unreal.Vector(1.0, width_scale, 1.0))
+                except Exception:
+                    pass
+
+    log_info(f"[road_build] {len(spawner.spawned)} tiles over {total_len:.0f}cm, "
+             f"{misses} skipped (no ground), folder '{folder}'")
+    return {"status": "ok", "placed": len(spawner.spawned), "failed": failed,
+            "skipped_no_ground": misses, "path_length": round(total_len, 1),
+            "tile_length": tile_len, "folder": folder}

@@ -5,7 +5,7 @@
 ## What this repo is
 
 Python automation framework for Unreal Editor for Fortnite (UEFN).
-367 tools, 55 categories, MCP HTTP bridge, PySide6 dashboard.
+368 tools, 55 categories, MCP HTTP bridge, PySide6 dashboard.
 Any MCP-compatible AI connects via `.mcp.json` (pre-configured).
 
 ## Non-negotiable rules
@@ -16,7 +16,7 @@ Any MCP-compatible AI connects via `.mcp.json` (pre-configured).
 4. **Bump `__tool_count__` and `__category_count__`** in `Content/Python/UEFN_Toolbelt/__init__.py` when adding tools.
 5. **Full UEFN restart required** when adding a new module to `tools/__init__.py`. Nuclear reload crashes. See `docs/UEFN_QUIRKS.md` Quirk #26.
 6. **All tool functions must return `{"status": "ok"/"error", ...}`** — never None, never a bare primitive.
-7. **Check the registry before building anything** — 367 tools exist. Search first:
+7. **Check the registry before building anything** — 368 tools exist. Search first:
    ```bash
    grep -rh 'name="' Content/Python/UEFN_Toolbelt/tools/ --include="*.py" \
      | grep -o 'name="[^"]*"' | sed 's/name="//;s/"//' | sort | grep <keyword>
