@@ -27,6 +27,7 @@ Palettes live in Saved/UEFN_Toolbelt/palettes/{name}.json.
 import json
 import math
 import os
+import random
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -575,3 +576,186 @@ def building_generate(
     return {"status": "ok", "pieces": counts, "total": len(spawner.spawned),
             "failed": failed, "cell": cell, "wall_height": wall_h,
             "bounds": bounds, "folder": folder, "terrain": terrain}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Decoration — clutter ring around a building
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _folder_bounds(folder_name: str):
+    """World-space AABB (center, extent) of all actors in an Outliner folder."""
+    sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    mins = [float("inf")] * 3
+    maxs = [float("-inf")] * 3
+    found = 0
+    for a in sub.get_all_level_actors():
+        try:
+            if str(a.get_folder_path()) != folder_name:
+                continue
+            origin, ext = a.get_actor_bounds(False)
+            found += 1
+            for i, (o, e) in enumerate(((origin.x, ext.x), (origin.y, ext.y), (origin.z, ext.z))):
+                mins[i] = min(mins[i], o - e)
+                maxs[i] = max(maxs[i], o + e)
+        except Exception:
+            continue
+    if not found:
+        return None
+    center = [(mins[i] + maxs[i]) / 2.0 for i in range(3)]
+    extent = [(maxs[i] - mins[i]) / 2.0 for i in range(3)]
+    return center, extent, found
+
+
+@register_tool(
+    name="building_decorate",
+    category="Procedural",
+    description=(
+        "Scatter clutter props in a ring band around a building (or any Outliner "
+        "folder's bounds): seeded random positions and yaw, ground-snapped, "
+        "publish-validated assets, one undo. The set-dressing pass that makes "
+        "generated buildings look lived-in."
+    ),
+    tags=["building", "decorate", "clutter", "props", "scatter", "ring", "palette", "ai"],
+    example='tb.run("building_decorate", assets=["/Game/Creative/.../CM_Spooky_Dolls_01"], around_folder="Building", count=14)',
+)
+def building_decorate(
+    assets: list = None,
+    around_folder: str = "Building",
+    center: list = None,
+    extent: list = None,
+    count: int = 16,
+    band: float = 700.0,
+    margin: float = 120.0,
+    min_spacing: float = 150.0,
+    seed: int = 42,
+    ground_snap: bool = True,
+    random_yaw: bool = True,
+    folder: str = "Decor",
+    allow_restricted: bool = False,
+    dry_run: bool = False,
+    **kwargs,
+) -> dict:
+    """
+    Dress the surroundings of a building with clutter props.
+
+    Positions are sampled in a rectangular ring band around the target bounds:
+    outside the footprint+margin, inside footprint+margin+band. Each prop gets
+    a seeded random asset from `assets`, a random yaw, and its bbox bottom
+    set onto the traced ground (or the bounds' base Z).
+
+    Args:
+        assets:        Asset paths to choose from (pick them from
+                       asset_catalog_query publishable=True). Required.
+        around_folder: Outliner folder whose actors define the footprint
+                       (default "Building" — building_generate's default).
+        center/extent: Explicit AABB override [x,y,z] / [hx,hy] — skips the
+                       folder lookup when given.
+        count:         Props to place.
+        band:          Ring width in cm beyond footprint+margin.
+        margin:        Clear gap between walls and the nearest prop.
+        min_spacing:   Minimum distance between placed props (cm).
+        seed:          RNG seed — same seed, same layout.
+        ground_snap:   Trace terrain under each prop (else base of bounds).
+        random_yaw:    Random rotation per prop (else yaw 0).
+        folder:        Outliner folder for the spawned props.
+        allow_restricted: Permit assets that fail publish validation.
+        dry_run:       Plan only — counts and band geometry, no spawning.
+    """
+    if not assets:
+        return {"status": "error", "error": "assets list is required — pick paths via "
+                'asset_catalog_query(..., publishable=True)'}
+
+    if not allow_restricted:
+        from .api_capability_crawler import is_publishable_path
+        restricted = [p for p in assets if not is_publishable_path(p)]
+        if restricted:
+            return {"status": "error",
+                    "error": "These assets fail UEFN publish validation: "
+                             f"{restricted}. Use asset_catalog_query publishable=True, "
+                             "or pass allow_restricted=True."}
+
+    # ── Target bounds ─────────────────────────────────────────────────────────
+    base_z = None
+    if center is not None and extent is not None:
+        cx, cy = float(center[0]), float(center[1])
+        hx, hy = float(extent[0]), float(extent[1])
+        base_z = float(center[2]) if len(center) > 2 else 0.0
+    else:
+        fb = _folder_bounds(around_folder)
+        if fb is None:
+            return {"status": "error",
+                    "error": f"No actors found in folder '{around_folder}' — "
+                             "pass center+extent explicitly or build first."}
+        c, e, n = fb
+        cx, cy = c[0], c[1]
+        hx, hy = e[0], e[1]
+        base_z = c[2] - e[2]   # bottom of the building
+
+    inner_x, inner_y = hx + margin, hy + margin
+    outer_x, outer_y = inner_x + band, inner_y + band
+
+    # ── Measure each unique asset once (bbox for ground placement) ────────────
+    measured: Dict[str, dict] = {}
+    bad: List[str] = []
+    for p in dict.fromkeys(assets):
+        info = _measure_role_asset(p)
+        if info is None:
+            bad.append(p)
+        else:
+            measured[p] = info
+    if not measured:
+        return {"status": "error", "error": f"No asset could be loaded/measured: {bad}"}
+    if bad:
+        log_warning(f"[building_decorate] skipping unmeasurable assets: {bad}")
+
+    pool = [measured[p] for p in assets if p in measured]
+
+    # ── Sample ring positions (seeded, rejection + spacing) ───────────────────
+    rng = random.Random(seed)
+    positions: List[tuple] = []
+    attempts = 0
+    while len(positions) < count and attempts < count * 60:
+        attempts += 1
+        x = rng.uniform(cx - outer_x, cx + outer_x)
+        y = rng.uniform(cy - outer_y, cy + outer_y)
+        if abs(x - cx) < inner_x and abs(y - cy) < inner_y:
+            continue   # inside the footprint+margin — reject
+        if any(math.hypot(x - px, y - py) < min_spacing for px, py, _ in positions):
+            continue
+        positions.append((x, y, rng.uniform(0, 360) if random_yaw else 0.0))
+
+    plan = []
+    misses = 0
+    for i, (x, y, yaw) in enumerate(positions):
+        info = rng.choice(pool)
+        if ground_snap:
+            z = trace_ground_z(x, y)
+            if z is None:
+                # No ground under this spot (island edge, hole) — placing at a
+                # fallback height leaves props floating in mid-air. Skip it.
+                misses += 1
+                continue
+        else:
+            z = base_z
+        # bbox bottom on the ground
+        zc = z + float(info["size"][2]) / 2.0
+        plan.append((info, [x, y, zc], yaw, f"DEC_{i:03d}"))
+
+    if dry_run:
+        return {"status": "ok", "dry_run": True, "planned": len(plan),
+                "requested": count, "ground_misses": misses,
+                "band_inner": [inner_x, inner_y], "band_outer": [outer_x, outer_y],
+                "center": [cx, cy], "base_z": base_z}
+
+    spawner = _Spawner(folder)
+    failed = 0
+    with undo_transaction(f"Toolbelt: building_decorate x{len(plan)}"):
+        for info, pos, yaw, label in plan:
+            if spawner.place(info, pos, yaw, label) is None:
+                failed += 1
+
+    log_info(f"[building_decorate] {len(spawner.spawned)} props around "
+             f"({cx:.0f}, {cy:.0f}), {failed} failed, folder '{folder}'")
+    return {"status": "ok", "placed": len(spawner.spawned), "requested": count,
+            "failed": failed, "ground_misses": misses, "folder": folder,
+            "seed": seed}
