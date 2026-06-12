@@ -430,7 +430,7 @@ def map_lint(
         label = a.get_actor_label()
         bottom = o.z - e.z
         # trace from just under the bbox so we don't hit the actor itself
-        z = trace_ground_z(o.x, o.y, start_z=bottom - 2.0)
+        z = trace_ground_z(o.x, o.y, start_z=bottom - 2.0, ignore=[a])
         if z is not None:
             gap = bottom - z
             if gap > float_threshold:
@@ -438,7 +438,8 @@ def map_lint(
         else:
             # nothing below at all — floating over void
             floating.append({"actor": label, "air_below_cm": None})
-        zs = trace_ground_z(o.x, o.y, start_z=o.z + e.z + 100000.0)
+        # buried: exclude the actor itself or the trace reports its own top (live bug)
+        zs = trace_ground_z(o.x, o.y, start_z=o.z + e.z + 100000.0, ignore=[a])
         if zs is not None and (zs - bottom) > bury_threshold:
             buried.append({"actor": label, "sunken_cm": round(zs - bottom, 1)})
 

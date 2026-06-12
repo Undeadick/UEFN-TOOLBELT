@@ -70,3 +70,28 @@ landed a test wall inside the user's labyrinth.
 Build/result markers in logs are localized (Russian: "УСПЕШНО — сборка
 завершена"). English-only regexes report UNKNOWN forever. Parse both; prefer
 the main editor log (UnrealEditorFortnite.log), not "newest .log".
+
+## L11 — Verse device assets are NOT spawnable via Python (2026-06-13)
+
+After a successful Verse build the compiled device class is invisible to the
+Asset Registry and unloadable by any guessed path (/project/Name,
+/project/Verse/Name, _C class paths). Placing a Verse device in the level is
+a MANUAL drag-and-drop from the Content Browser — plan for exactly one human
+action per new Verse device. Design Verse devices coordinate-based (no
+@editable wiring) so that single placement anywhere in the level is enough.
+
+## L12 — 20+ stationary lights exceed the overlap budget (2026-06-13)
+
+Spawned PointLights default to Stationary mobility; a maze with 20+ of them
+shows red-X light icons (overlap limit). Set mobility=MOVABLE for procedural
+light sets (Lumen handles dynamic). Also: looking straight at a light source
+blows out auto-exposure in captures — review corridors at an angle, and tune
+PPV exposure compensation negative (-1.0..-1.2) for night scenes.
+
+## L13 — map_lint's own first run was the lesson (2026-06-13)
+
+The buried-actor check traced from above and hit the actor itself, reporting
+every wall "buried by its own height". Ground/surface traces around an actor
+must pass ignore=[actor]. After the fix the same lint immediately caught two
+REAL duplicate walls (lobby connectors stacked on maze boundary) — lint the
+build after every generation pass.

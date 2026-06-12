@@ -405,6 +405,7 @@ def trace_ground_z(
     world_y: float,
     start_z: float = 50000.0,
     end_z: float = -50000.0,
+    ignore: Optional[list] = None,
 ) -> Optional[float]:
     """
     Canonical downward line trace: return the surface Z under (x, y), or None
@@ -425,7 +426,7 @@ def trace_ground_z(
             end=unreal.Vector(world_x, world_y, end_z),
             trace_channel=unreal.TraceTypeQuery.TRACE_TYPE_QUERY1,
             trace_complex=False,
-            actors_to_ignore=[],
+            actors_to_ignore=ignore or [],
             draw_debug_type=unreal.DrawDebugTrace.NONE,
             ignore_self=True,
         )
