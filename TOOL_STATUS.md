@@ -64,7 +64,8 @@ These tools do not require any actors to be selected or a specific level to be o
 | `asset_catalog_query` | ✅ live | keyword/publishable/measure queries; measure loads only shown results |
 | `palette_save` / `palette_list` / `palette_get` / `palette_delete` | ✅ live | castle + temple palettes; publish-validation guard rejects restricted assets |
 | `building_generate` | ✅ live | 62-piece two-storey house: gable roof, windows, gable-end fill, ground_snap |
-| `building_decorate` | 🟡 written | clutter ring around folder bounds — pending live run |
+| `building_decorate` | ✅ live | 14 spooky props ringed around the temple; floating-prop skip confirmed |
+| `road_build` | ✅ live | 16-tile asphalt road along a curved waypoint path |
 | `screenshot_orbit` | ⚠️ deprecated on low-VRAM | in-engine capture OOM-crashes 6GB GPUs — use scripts/capture_uefn_window.ps1 |
 | bridge `spawn_actors_bulk` | ✅ live | 24-actor ring, exact rotations, single-undo revert |
 | `scripts/build_verse.ps1` | ✅ live | Ctrl+Shift+B trigger → VerseBuild УСПЕШНО detected by verse_build_status |
