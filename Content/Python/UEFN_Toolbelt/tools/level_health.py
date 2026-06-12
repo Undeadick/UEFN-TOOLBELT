@@ -353,3 +353,132 @@ def run_level_health_open(**kwargs) -> dict:
     log_info(bar)
 
     return report
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Map lint — geometric QA (floaters, clipping, scale outliers)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@register_tool(
+    name="map_lint",
+    category="Utilities",
+    description=(
+        "Geometric QA pass over level actors: floating actors (air under the "
+        "bbox), buried actors, heavy bbox interpenetration (clipping), and "
+        "scale outliers. Run after every generation pass, before visual review."
+    ),
+    tags=["lint", "qa", "audit", "floating", "clipping", "scale", "ai", "review"],
+    example='tb.run("map_lint", folder="Building_Temple_Test")',
+)
+def map_lint(
+    folder: str = "",
+    float_threshold: float = 30.0,
+    bury_threshold: float = 150.0,
+    overlap_frac: float = 0.6,
+    scale_min: float = 0.05,
+    scale_max: float = 10.0,
+    max_actors: int = 800,
+    max_issues: int = 60,
+    **kwargs,
+) -> dict:
+    """
+    Mathematical level QA — catches what screenshots miss and costs nothing.
+
+    Checks (StaticMesh actors only):
+      floating   — downward trace from under the bbox finds ground more than
+                   float_threshold cm below the bbox bottom.
+      buried     — bbox bottom is more than bury_threshold cm BELOW the
+                   traced surface at its location (sunken into terrain).
+      clipping   — two actors' bboxes interpenetrate by more than
+                   overlap_frac of the smaller bbox volume. Modular kits
+                   legitimately overlap a little — the default 0.6 flags
+                   only severe interpenetration.
+      scale      — any |scale component| outside [scale_min, scale_max].
+
+    Args:
+        folder:     Limit to one World Outliner folder ("" = whole level).
+        max_actors: Safety cap — clipping is O(n²); the tool refuses larger
+                    sets, pass a folder instead.
+
+    Returns:
+        {"status": "ok", "checked": n, "issues": {...}, "counts": {...}}
+    """
+    from ..core import trace_ground_z
+
+    sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    actors = []
+    for a in sub.get_all_level_actors():
+        try:
+            if folder and str(a.get_folder_path()) != folder:
+                continue
+            if not a.get_components_by_class(unreal.StaticMeshComponent):
+                continue
+            origin, ext = a.get_actor_bounds(False)
+            if ext.x <= 1 and ext.y <= 1 and ext.z <= 1:
+                continue
+            actors.append((a, origin, ext))
+        except Exception:
+            continue
+
+    if len(actors) > max_actors:
+        return {"status": "error",
+                "error": f"{len(actors)} actors exceeds max_actors={max_actors} "
+                         "(clipping check is O(n^2)) — lint per folder instead."}
+
+    floating, buried, scale_bad = [], [], []
+    for a, o, e in actors:
+        label = a.get_actor_label()
+        bottom = o.z - e.z
+        # trace from just under the bbox so we don't hit the actor itself
+        z = trace_ground_z(o.x, o.y, start_z=bottom - 2.0)
+        if z is not None:
+            gap = bottom - z
+            if gap > float_threshold:
+                floating.append({"actor": label, "air_below_cm": round(gap, 1)})
+        else:
+            # nothing below at all — floating over void
+            floating.append({"actor": label, "air_below_cm": None})
+        zs = trace_ground_z(o.x, o.y, start_z=o.z + e.z + 100000.0)
+        if zs is not None and (zs - bottom) > bury_threshold:
+            buried.append({"actor": label, "sunken_cm": round(zs - bottom, 1)})
+
+        s = a.get_actor_scale3d()
+        if not all(scale_min <= abs(v) <= scale_max for v in (s.x, s.y, s.z)):
+            scale_bad.append({"actor": label, "scale": [round(s.x, 2), round(s.y, 2), round(s.z, 2)]})
+
+    clipping = []
+    for i in range(len(actors)):
+        ai, oi, ei = actors[i]
+        for j in range(i + 1, len(actors)):
+            aj, oj, ej = actors[j]
+            dx = min(oi.x + ei.x, oj.x + ej.x) - max(oi.x - ei.x, oj.x - ej.x)
+            dy = min(oi.y + ei.y, oj.y + ej.y) - max(oi.y - ei.y, oj.y - ej.y)
+            dz = min(oi.z + ei.z, oj.z + ej.z) - max(oi.z - ei.z, oj.z - ej.z)
+            if dx <= 0 or dy <= 0 or dz <= 0:
+                continue
+            inter = dx * dy * dz
+            vol_i = 8.0 * ei.x * ei.y * ei.z
+            vol_j = 8.0 * ej.x * ej.y * ej.z
+            smaller = max(min(vol_i, vol_j), 1.0)
+            frac = inter / smaller
+            if frac >= overlap_frac:
+                clipping.append({"a": ai.get_actor_label(), "b": aj.get_actor_label(),
+                                 "overlap_frac": round(frac, 2)})
+
+    issues = {
+        "floating": floating[:max_issues],
+        "buried": buried[:max_issues],
+        "clipping": sorted(clipping, key=lambda x: -x["overlap_frac"])[:max_issues],
+        "scale_outliers": scale_bad[:max_issues],
+    }
+    counts = {k: len(v) for k, v in
+              (("floating", floating), ("buried", buried),
+               ("clipping", clipping), ("scale_outliers", scale_bad))}
+    total = sum(counts.values())
+
+    log_info(f"[map_lint] {len(actors)} actors checked, {total} issue(s): {counts}")
+    return {"status": "ok", "checked": len(actors), "clean": total == 0,
+            "counts": counts, "issues": issues,
+            "params": {"folder": folder or "(level)",
+                       "float_threshold": float_threshold,
+                       "overlap_frac": overlap_frac}}

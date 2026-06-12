@@ -1127,3 +1127,116 @@ def asset_catalog_query(
     return {"status": "ok", "total_matches": total, "shown": len(shown),
             "counts_by_class": counts_by_class, "results": shown,
             "scanned_at": data.get("scanned_at", "")}
+
+
+@register_tool(
+    name="kit_metrics",
+    category="API Explorer",
+    description=(
+        "Measure one building kit's native grid: load a capped sample of its "
+        "meshes, group by role keyword (wall/floor/door/roof/...), and report "
+        "per-role size medians + the inferred build cell. Ground truth for "
+        "building on a kit's own grid instead of guessing 512."
+    ),
+    tags=["kit", "metrics", "grid", "measure", "palette", "building", "ai"],
+    example='tb.run("kit_metrics", path_filter="JungleTemple")',
+)
+def kit_metrics(
+    path_filter: str = "",
+    max_measure: int = 40,
+    **kwargs,
+) -> dict:
+    """
+    Derive a kit's native metrics from real geometry.
+
+    Reads the asset catalog (run asset_catalog_scan first), filters StaticMesh
+    entries whose path contains path_filter, loads up to max_measure of them
+    (~45 ms each), and aggregates bbox sizes per role keyword found in the
+    asset name: wall, floor, door, window, roof, stair, pillar, trim, corner.
+
+    Returns per-role piece counts and median [x, y, z], plus "cell" (median
+    wall X-length) and "wall_height" — the two numbers building layout math
+    needs.
+
+    Args:
+        path_filter: Substring of the kit's package path (e.g. "JungleTemple",
+                     "Fortress_Broken_Walls"). Required.
+        max_measure: Cap on loaded assets (default 40).
+    """
+    if not path_filter:
+        return {"status": "error", "error": "path_filter is required (kit path substring)"}
+
+    cat_path = _catalog_json_path()
+    if not os.path.isfile(cat_path):
+        return {"status": "error", "error": "No asset catalog — run asset_catalog_scan first."}
+    mtime = os.path.getmtime(cat_path)
+    if _catalog_cache["mtime"] != mtime:
+        with open(cat_path, encoding="utf-8") as f:
+            _catalog_cache["data"] = json.load(f)
+        _catalog_cache["mtime"] = mtime
+    data = _catalog_cache["data"]
+
+    pf = path_filter.lower()
+    meshes = [e for e in data.get("assets", {}).get("StaticMesh", [])
+              if pf in e["path"].lower()]
+    if not meshes:
+        return {"status": "error", "error": f"No StaticMesh in catalog matching '{path_filter}'"}
+
+    roles = ("wall", "floor", "door", "window", "roof", "stair", "pillar", "trim", "corner")
+    by_role: Dict[str, list] = {r: [] for r in roles}
+    publishable_count = 0
+
+    measured = 0
+    for e in meshes:
+        if measured >= max_measure:
+            break
+        name_l = e["name"].lower()
+        role = next((r for r in roles if r in name_l), None)
+        if role is None:
+            continue
+        obj = unreal.EditorAssetLibrary.load_asset(e["path"])
+        if obj is None or not isinstance(obj, unreal.StaticMesh):
+            continue
+        measured += 1
+        if is_publishable_path(e["path"]):
+            publishable_count += 1
+        try:
+            bb = obj.get_bounding_box()
+            size = sorted([bb.max.x - bb.min.x, bb.max.y - bb.min.y], reverse=True) \
+                + [bb.max.z - bb.min.z]
+            # store as [long_horizontal, short_horizontal, height]
+            by_role[role].append([round(v, 1) for v in size])
+        except Exception:
+            continue
+
+    def _median(vals):
+        s = sorted(vals)
+        return s[len(s) // 2] if s else None
+
+    role_stats = {}
+    for r, sizes in by_role.items():
+        if not sizes:
+            continue
+        role_stats[r] = {
+            "count": len(sizes),
+            "median_size": [_median([s[0] for s in sizes]),
+                            _median([s[1] for s in sizes]),
+                            _median([s[2] for s in sizes])],
+        }
+
+    cell = role_stats.get("wall", {}).get("median_size", [None])[0]
+    wall_h = role_stats.get("wall", {}).get("median_size", [None, None, None])[2]
+
+    out = {
+        "status": "ok",
+        "kit": path_filter,
+        "meshes_in_catalog": len(meshes),
+        "measured": measured,
+        "publishable_measured": publishable_count,
+        "cell": cell,
+        "wall_height": wall_h,
+        "roles": role_stats,
+    }
+    unreal.log(f"[kit_metrics] {path_filter}: cell={cell} wall_h={wall_h} "
+               f"roles={ {r: v['count'] for r, v in role_stats.items()} }")
+    return out

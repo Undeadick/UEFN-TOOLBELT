@@ -33,11 +33,11 @@ Claude Code config — add to .mcp.json in your project root:
 Then in UEFN (Output Log or Toolbelt dashboard):
     import UEFN_Toolbelt as tb; tb.run("mcp_start")
 
-After that, Claude Code has full control over UEFN — 368 tools, live actor data,
+After that, Claude Code has full control over UEFN — 370 tools, live actor data,
 arbitrary Python execution, viewport control, and more.
 
 What this exposes (beyond Kirch's original 22 tools):
-    run_toolbelt_tool   — call any of the 368 registered toolbelt tools by name
+    run_toolbelt_tool   — call any of the 370 registered toolbelt tools by name
     list_toolbelt_tools — list every available tool with category and description
     mcp_get_log         — read the last N lines of the MCP listener log ring
 
@@ -119,6 +119,43 @@ _VERSE_CHAPTERS: dict[str, str] = {
 REQUEST_TIMEOUT        = 30.0
 LONG_OPERATION_TIMEOUT = 120.0   # for tool runs that may take longer
 
+# Design Book — level-design knowledge base (docs/design_book/)
+DESIGN_BOOK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "docs", "design_book")
+_DESIGN_CHAPTERS: dict[str, str] = {
+    "overview":      "00_overview.md",
+    "metrics":       "01_metrics.md",
+    "units":         "01_metrics.md",
+    "grid":          "01_metrics.md",
+    "scale":         "01_metrics.md",
+    "composition":   "02_composition.md",
+    "landmarks":     "02_composition.md",
+    "silhouette":    "02_composition.md",
+    "readability":   "03_readability.md",
+    "navigation":    "03_readability.md",
+    "wayfinding":    "03_readability.md",
+    "flow":          "04_flow.md",
+    "spawns":        "04_flow.md",
+    "combat":        "04_flow.md",
+    "pacing":        "04_flow.md",
+    "theming":       "05_theming.md",
+    "palettes":      "05_theming.md",
+    "color":         "05_theming.md",
+    "props":         "05_theming.md",
+    "horror":        "06_horror.md",
+    "labyrinth":     "06_horror.md",
+    "scare":         "06_horror.md",
+    "optimization":  "07_optimization.md",
+    "memory":        "07_optimization.md",
+    "performance":   "07_optimization.md",
+    "budgets":       "07_optimization.md",
+    "publishing":    "08_publishing.md",
+    "validation":    "08_publishing.md",
+    "restrictions":  "08_publishing.md",
+    "lessons":       "09_lessons.md",
+    "mistakes":      "09_lessons.md",
+}
+
 # ─── HTTP client ──────────────────────────────────────────────────────────────
 
 
@@ -181,7 +218,7 @@ mcp = FastMCP(
         "IMPORTANT: Start the listener in UEFN first:\n"
         "  import UEFN_Toolbelt as tb; tb.run('mcp_start')\n\n"
         "Key tools:\n"
-        "  run_toolbelt_tool   — run ANY of the 368 registered toolbelt tools\n"
+        "  run_toolbelt_tool   — run ANY of the 370 registered toolbelt tools\n"
         "  execute_python      — run arbitrary Python inside UEFN with full unreal.*\n"
         "  list_toolbelt_tools — see every tool available\n"
         "  get_all_actors      — snapshot the level\n"
@@ -256,7 +293,7 @@ def mcp_get_log(last_n: int = 50) -> str:
 def run_toolbelt_tool(tool_name: str, kwargs: dict | None = None) -> str:
     """Run any registered UEFN Toolbelt tool by name.
 
-    This is the single most powerful MCP tool — it exposes all 368 toolbelt tools
+    This is the single most powerful MCP tool — it exposes all 370 toolbelt tools
     to Claude Code through one command. Instead of writing custom execute_python
     code, just name the tool and pass its arguments as a dict.
 
@@ -817,6 +854,91 @@ def verse_book_update() -> str:
         return "git pull timed out after 30s."
     except Exception as e:
         return f"git pull failed: {e}"
+
+
+# ─── Design Book (level-design knowledge base) ────────────────────────────────
+
+
+@mcp.tool()
+def design_book_search(query: str, context_lines: int = 8) -> str:
+    """Search the UEFN Design Book — level-design knowledge for map building.
+
+    ALWAYS consult this before building map content (same rule as
+    verse_book_search before writing Verse). Covers Fortnite metrics (512
+    grid, 192cm player), composition, readability, flow, theming, horror
+    design, optimization budgets, publishing restrictions, and the living
+    lessons log of mistakes already made.
+
+    Args:
+        query:         Keyword or concept (e.g. 'gable', 'spawn', 'sightline',
+                       'publishable', 'corridor width', 'vignette').
+        context_lines: Lines of context around each match (default 8).
+    """
+    if not os.path.isdir(DESIGN_BOOK_PATH):
+        return ("design_book not found — expected docs/design_book/ next to "
+                "mcp_server.py")
+
+    results = []
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
+    for fname in sorted(os.listdir(DESIGN_BOOK_PATH)):
+        if not fname.endswith(".md"):
+            continue
+        try:
+            with open(os.path.join(DESIGN_BOOK_PATH, fname), encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception:
+            continue
+        i = 0
+        while i < len(lines):
+            if pattern.search(lines[i]):
+                start = max(0, i - context_lines)
+                end = min(len(lines), i + context_lines + 1)
+                results.append(f"### {fname} — line {i + 1}\n" + "".join(lines[start:end]))
+                i = end
+            else:
+                i += 1
+
+    if not results:
+        return (f"No matches for '{query}' in the Design Book. "
+                f"Chapters: {sorted(set(_DESIGN_CHAPTERS.values()))}")
+    capped = results[:12]
+    return (f"// {len(results)} match(es) for '{query}' — showing {len(capped)}\n\n"
+            + "\n---\n".join(capped))
+
+
+@mcp.tool()
+def design_book_chapter(topic: str) -> str:
+    """Fetch a complete UEFN Design Book chapter by topic.
+
+    Topics: overview, metrics, composition, readability, flow, theming,
+    horror, optimization, publishing, lessons (plus aliases like spawns,
+    color, labyrinth, budgets, restrictions, mistakes).
+
+    Read 'metrics' before placing anything, 'lessons' at the start of every
+    build session, 'publishing' before selecting assets for a real map.
+    """
+    if not os.path.isdir(DESIGN_BOOK_PATH):
+        return ("design_book not found — expected docs/design_book/ next to "
+                "mcp_server.py")
+
+    key = topic.lower().replace(" ", "_").replace("-", "_")
+    fname = _DESIGN_CHAPTERS.get(key)
+    if fname is None:
+        for k, f in _DESIGN_CHAPTERS.items():
+            if key in k or k in key:
+                fname = f
+                break
+    if fname is None:
+        return (f"Unknown topic '{topic}'. "
+                f"Available: {sorted(set(_DESIGN_CHAPTERS.keys()))}")
+
+    fpath = os.path.join(DESIGN_BOOK_PATH, fname)
+    try:
+        with open(fpath, encoding="utf-8") as f:
+            content = f.read()
+        return f"// {fname}  ({len(content.splitlines())} lines)\n\n{content}"
+    except Exception as e:
+        return f"Error reading {fname}: {e}"
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
